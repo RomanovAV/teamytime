@@ -1,0 +1,358 @@
+{
+  "schema_version": "teamytime.probe-analysis.v1",
+  "analysis_date": "2026-09-14",
+  "sources": [
+    {
+      "filename": "teamytime-probe-results.tar.gz",
+      "sha256": "b0874bd729d7b2c88dc4f49b64206ddf3b7b2ff19da5bac0e93a1152a0ce5ee9"
+    },
+    {
+      "filename": "teamytime-probe-results.tar-1.gz",
+      "sha256": "56df22e9b0e20beb7fc6391c6e9dffece03d7f899d8bdebfb0863dd158bf0993"
+    }
+  ],
+  "cli_version": "26.8.41",
+  "zsh_version": "5.9",
+  "requested_models": {
+    "model_a": null,
+    "model_b": null
+  },
+  "participants": {
+    "SESSION_A": "92a2014b-68bb-4148-af26-61809b4325b2",
+    "SESSION_B": "7b40de37-2651-42bc-9c99-d49f5ea2db78"
+  },
+  "process_summary": {
+    "process_failures": "0",
+    "skipped": "0"
+  },
+  "probes": {
+    "03-create-a": {
+      "exit_code": 0,
+      "session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 1396,
+      "result_usage": {
+        "input_tokens": 14766,
+        "output_tokens": 82,
+        "cache_read_input_tokens": 1408,
+        "total_tokens": 14848
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14766,
+          "output_tokens": 82,
+          "cache_read_input_tokens": 1408,
+          "total_tokens": 14848
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [],
+      "result_text": "ROLE_A: Контрольное слово ORBIT_7319 запомнил."
+    },
+    "03-create-b": {
+      "exit_code": 0,
+      "session_id": "7b40de37-2651-42bc-9c99-d49f5ea2db78",
+      "init_session_id": "7b40de37-2651-42bc-9c99-d49f5ea2db78",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 2830,
+      "result_usage": {
+        "input_tokens": 14767,
+        "output_tokens": 262,
+        "cache_read_input_tokens": 1472,
+        "total_tokens": 15029
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14767,
+          "output_tokens": 262,
+          "cache_read_input_tokens": 1472,
+          "total_tokens": 15029
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [],
+      "result_text": "ROLE_B: Запомнил контрольное слово CEDAR_4826."
+    },
+    "04-resume-a": {
+      "exit_code": 0,
+      "session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 1210,
+      "result_usage": {
+        "input_tokens": 29563,
+        "output_tokens": 150,
+        "cache_read_input_tokens": 15744,
+        "total_tokens": 29713
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14797,
+          "output_tokens": 68,
+          "cache_read_input_tokens": 14336,
+          "total_tokens": 14865
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [],
+      "result_text": "ORBIT_7319"
+    },
+    "05-parallel-a": {
+      "exit_code": 0,
+      "session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_session_id": "92a2014b-68bb-4148-af26-61809b4325b2",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 2091,
+      "result_usage": {
+        "input_tokens": 44431,
+        "output_tokens": 187,
+        "cache_read_input_tokens": 30080,
+        "total_tokens": 44618
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14868,
+          "output_tokens": 37,
+          "cache_read_input_tokens": 14336,
+          "total_tokens": 14905
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [],
+      "result_text": "ORBIT_7319"
+    },
+    "05-parallel-b": {
+      "exit_code": 0,
+      "session_id": "7b40de37-2651-42bc-9c99-d49f5ea2db78",
+      "init_session_id": "7b40de37-2651-42bc-9c99-d49f5ea2db78",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 2246,
+      "result_usage": {
+        "input_tokens": 29582,
+        "output_tokens": 306,
+        "cache_read_input_tokens": 15808,
+        "total_tokens": 29888
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14815,
+          "output_tokens": 44,
+          "cache_read_input_tokens": 14336,
+          "total_tokens": 14859
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [],
+      "result_text": "ROLE_B: CEDAR_4826"
+    },
+    "06-partials": {
+      "exit_code": 0,
+      "session_id": "ab2def32-21eb-4e54-bf25-36bc4169886c",
+      "init_session_id": "ab2def32-21eb-4e54-bf25-36bc4169886c",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "stream_event": 127,
+        "assistant": 2,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 1,
+      "duration_ms": 2107,
+      "result_usage": {
+        "input_tokens": 14734,
+        "output_tokens": 301,
+        "cache_read_input_tokens": 14336,
+        "total_tokens": 15035
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 14734,
+          "output_tokens": 301,
+          "cache_read_input_tokens": 14336,
+          "total_tokens": 15035
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": []
+    },
+    "07-tools": {
+      "exit_code": 0,
+      "session_id": "d4f4c16a-ed3e-407f-997b-7161c7007a51",
+      "init_session_id": "d4f4c16a-ed3e-407f-997b-7161c7007a51",
+      "init_model": "CodeChat",
+      "assistant_models": [
+        "Qwen3.6-35B"
+      ],
+      "event_counts": {
+        "system": 1,
+        "assistant": 11,
+        "user": 3,
+        "result": 1
+      },
+      "result_subtype": "success",
+      "is_error": false,
+      "num_turns": 4,
+      "duration_ms": 5218,
+      "result_usage": {
+        "input_tokens": 67061,
+        "output_tokens": 330,
+        "cache_read_input_tokens": 39872,
+        "total_tokens": 67391
+      },
+      "assistant_usage_records": [
+        {
+          "input_tokens": 16473,
+          "output_tokens": 131,
+          "cache_read_input_tokens": 1472,
+          "total_tokens": 16604
+        },
+        {
+          "input_tokens": 16701,
+          "output_tokens": 105,
+          "cache_read_input_tokens": 4864,
+          "total_tokens": 16806
+        },
+        {
+          "input_tokens": 16879,
+          "output_tokens": 64,
+          "cache_read_input_tokens": 16640,
+          "total_tokens": 16943
+        },
+        {
+          "input_tokens": 17008,
+          "output_tokens": 30,
+          "cache_read_input_tokens": 16896,
+          "total_tokens": 17038
+        }
+      ],
+      "permission_denials": [],
+      "tool_calls": [
+        "run_shell_command",
+        "write_file",
+        "run_shell_command"
+      ],
+      "result_text": "Прочитанная строка: **TEAMYTIME_TOOL_OK**"
+    }
+  },
+  "browser_authorization_completed": true,
+  "partial_stream": {
+    "event_counts": {
+      "message_start": 1,
+      "content_block_start": 2,
+      "content_block_delta": 121,
+      "content_block_stop": 2,
+      "message_stop": 1
+    },
+    "delta_counts": {
+      "thinking_delta": 19,
+      "text_delta": 102
+    },
+    "text_characters": 943,
+    "text_deltas_equal_final_result": true
+  },
+  "acp": {
+    "request_method": "initialize",
+    "response_id": 1,
+    "protocol_version": 1,
+    "agent_info": {
+      "name": "gigacode",
+      "title": "GigaCode",
+      "version": "0.13.1"
+    },
+    "agent_capabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": true,
+        "embeddedContext": true
+      },
+      "sessionCapabilities": {
+        "list": {},
+        "resume": {}
+      }
+    },
+    "auth_method_ids": [
+      "openai",
+      "qwen-oauth",
+      "gigacode"
+    ],
+    "exit_code": 143,
+    "stopped_by_probe": true,
+    "session_operations_exercised": []
+  },
+  "cumulative_usage_checks": {
+    "A": {
+      "input_tokens": true,
+      "output_tokens": true,
+      "cache_read_input_tokens": true,
+      "total_tokens": true
+    },
+    "B": {
+      "input_tokens": true,
+      "output_tokens": true,
+      "cache_read_input_tokens": true,
+      "total_tokens": true
+    }
+  }
+}
