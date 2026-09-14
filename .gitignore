@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.teamytime/
+coverage/
+__pycache__/
+*.pyc
+.DS_Store
