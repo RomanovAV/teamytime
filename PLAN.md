@@ -301,7 +301,9 @@ Contractility сейчас использует JavaScript (`.mjs`); новый 
 ### Этап 0. Проверка протокола GigaCode
 
 Начальный набор команд для машины с установленным CLI:
-[GIGACODE_CHECKLIST.md](GIGACODE_CHECKLIST.md). Он собирает версию, результаты
+[GIGACODE_CHECKLIST.md](GIGACODE_CHECKLIST.md). Исполняемые файлы для Zsh:
+[основные проверки](scripts/check-gigacode.zsh) и [инициализация ACP](scripts/check-gigacode-acp.zsh).
+Они собирают версию, результаты
 работы с сессиями, моделями, инструментами и метаданные ACP. Проверка обычного
 потокового ввода будет подготовлена после уточнения схемы его сообщений.
 
