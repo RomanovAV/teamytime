@@ -10,6 +10,6 @@ export async function loadBuildTool() {
   try { return await import('esbuild'); }
   catch (error) {
     if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
-    throw new Error('Не установлен сборщик esbuild. Установите зависимости из настроенного корпоративного реестра: npm ci --include=dev. Если пакет недоступен, сохраните вывод установки для выбора замены.');
+    throw new Error('Не установлен сборщик esbuild. Запустите npm start для установки зависимостей из настроенного корпоративного реестра. Если пакет недоступен, сохраните вывод установки.');
   }
 }

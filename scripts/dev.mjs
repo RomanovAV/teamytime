@@ -20,7 +20,8 @@ const backend = await context({ ...serverOptions, plugins: [{ name: 'restart-ser
   build.onStart(stopServer);
   build.onEnd(result => {
     if (result.errors.length || stopping) return;
-    server = spawn(process.execPath, ['start.mjs'], { stdio: 'inherit' });
+    // The watcher has already built this entry; avoid a second production build.
+    server = spawn(process.execPath, ['dist/server.mjs'], { stdio: 'inherit' });
     server.on('error', error => console.error(error.message));
   });
 } }] });

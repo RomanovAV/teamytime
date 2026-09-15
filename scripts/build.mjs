@@ -29,7 +29,7 @@ export async function buildApp() {
     return `${name} ${pkg.version}\n${await readFile(`node_modules/${name}/LICENSE`, 'utf8')}`;
   }));
   await writeFile('dist/THIRD_PARTY_LICENSES.txt', licenses.join('\n\n--------------------\n\n'));
-  console.log('Локальная сборка готова: dist/. Запуск: npm start.');
+  console.log('Локальная сборка готова: dist/.');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
