@@ -6,6 +6,7 @@ export class CliErrors {
   private pending = '';
   private modelUnavailable = false;
   private authRequired = false;
+  get isModelUnavailable() { return this.modelUnavailable; }
 
   feed(chunk: Buffer, activity: (text: string) => void) {
     this.consume(this.decoder.write(chunk), activity);

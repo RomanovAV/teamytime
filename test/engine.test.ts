@@ -15,6 +15,54 @@ function fixture(adapter?: Adapter) {
   const create = () => engine.create({ prompt: 'Проверить совместную работу команды', teamId: 'default-team', mode: 'demo' });
   return { directory, store, engine, create, async close() { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+test('retry can resume immediately or remain paused by user choice', async () => {
+  for (const resume of [false, true]) {
+    let calls = 0;
+    const f = fixture(async () => { if (++calls === 1) throw new Error('failure'); return { reply: { message: 'Recovered', actions: [] } }; });
+    try {
+      const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+      f.engine.resolveTurn(r.id, r.turns[0].id, 'retry', resume);
+      if (!resume) { await delay(20); assert.equal(calls, 1); assert.equal(f.store.get(r.id).status, 'paused'); f.engine.control(r.id, 'resume'); }
+      await until(() => f.store.get(r.id).status === 'waiting'); assert.equal(calls, 2);
+    } finally { await f.close(); }
+  }
+});
+
+test('automatic recovery waits for other failures and respects turn budget', async () => {
+  const f = fixture(async () => ({ reply: { message: 'done', actions: [] } }));
+  try {
+    const r = f.create(); f.engine.control(r.id, 'pause');
+    f.store.update(r.id, 'fixture', r => {
+      r.turns[0].status = 'failed'; r.turns[0].startedAt = new Date().toISOString();
+      r.turns.push({ ...r.turns[0], id: 'second', agentId: 'alex', status: 'interrupted' });
+    });
+    f.engine.resolveTurn(r.id, r.turns[0].id, 'retry', true);
+    assert.equal(f.store.get(r.id).status, 'paused'); assert.equal(f.store.get(r.id).resumeAfterRecovery, true);
+    f.engine.resolveTurn(r.id, 'second', 'skip');
+    await until(() => f.store.get(r.id).status === 'waiting');
+    f.store.update(r.id, 'fixture', r => { r.status = 'paused'; r.team.maxTurns = 1; r.turns[0].status = 'failed'; });
+    f.engine.resolveTurn(r.id, r.turns[0].id, 'retry', true);
+    assert.equal(f.store.get(r.id).status, 'paused'); assert.match(f.store.get(r.id).note, /лимит/);
+  } finally { await f.close(); }
+});
+
+test('explicit continuation runs serially, persists warnings and stops at budget', async () => {
+  let active = 0, maxActive = 0;
+  const f = fixture(async () => {
+    maxActive = Math.max(maxActive, ++active); await delay(5); active--;
+    return { reply: { message: 'Нужен следующий шаг', actions: [{ type: 'continue', reason: 'Завершить проверку' }] }, warnings: ['Проверка Git отклонена'] };
+  });
+  try {
+    const r = f.create(); f.store.update(r.id, 'fixture', r => { r.team.maxTurns = 4; });
+    await until(() => f.store.get(r.id).status === 'paused');
+    const state = f.store.get(r.id);
+    assert.equal(state.turns.filter(t => t.status === 'succeeded').length, 4);
+    assert.equal(maxActive, 1); assert.equal(state.turns[0].warnings?.[0], 'Проверка Git отклонена');
+    assert.equal(state.turns.filter(t => t.status === 'queued').length, 1);
+    assert(state.messages.some(m => m.kind === 'system' && m.text.includes('Завершить проверку')));
+  } finally { await f.close(); }
+});
 test('demo completes through addressed messages, persists results and native identities', async () => {
   const f = fixture();
   try {
@@ -65,6 +113,7 @@ test('invalid action applies no partial artifacts and requires explicit recovery
   try {
     const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
     let state = f.store.get(r.id); assert.equal(state.artifacts.length, 0); assert(state.participants[0].sessionStarted);
+    assert.equal(state.turns[0].draft, 'Ошибка протокола');
     assert.throws(() => f.engine.control(r.id, 'resume'), /Сначала/);
     f.engine.resolveTurn(r.id, state.turns[0].id, 'skip'); f.engine.control(r.id, 'resume');
     await until(() => f.store.get(r.id).status === 'waiting');

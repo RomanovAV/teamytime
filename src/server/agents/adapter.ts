@@ -13,7 +13,7 @@ export interface AgentContext {
   draft: (text: string) => void; activity: (text: string) => void; init: (model?: string) => void;
   logger?: TurnLogger;
 }
-export interface AgentResult { reply: AgentReply; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string }
+export interface AgentResult { reply: AgentReply; warnings?: string[]; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string }
 export type Adapter = (context: AgentContext) => Promise<AgentResult>;
 export function executable(command: string): string | undefined {
   const choices = command.includes('/') ? [path.resolve(command)] : (process.env.PATH ?? '').split(path.delimiter).map(p => path.join(p, command));
@@ -32,7 +32,24 @@ export function cliArgs(c: AgentContext): string[] {
     '-p', buildPrompt(c.run, c.turn, p),
   ];
 }
+class ModelUnavailableError extends Error {}
+
 export const gigacodeAdapter: Adapter = async c => {
+  const deadline = Date.now() + c.cli.timeoutSeconds * 1000;
+  try { return await runGigacode(c, deadline); }
+  catch (error) {
+    if (!(error instanceof ModelUnavailableError) || c.participant.model === 'default' || c.signal.aborted) throw error;
+    const warning = `Указанная модель «${c.participant.model}» отсутствует в каталоге GigaCode. Использована модель по умолчанию CLI.`;
+    c.activity('Указанная модель недоступна. Повторяю с моделью по умолчанию CLI.');
+    c.logger?.event({ type: 'model-fallback', requestedModel: c.participant.model, fallbackModel: 'default' });
+    const result = await runGigacode({ ...c, participant: { ...c.participant, model: 'default' } }, deadline);
+    return { ...result, warnings: [warning, ...(result.warnings ?? [])] };
+  }
+};
+
+async function runGigacode(c: AgentContext, deadline: number): Promise<AgentResult> {
+  if (c.signal.aborted) throw new Error('Ход остановлен.');
+  if (Date.now() >= deadline) throw new Error(`GigaCode не завершил ход за ${c.cli.timeoutSeconds} секунд.`);
   const command = executable(c.cli.command);
   if (!command) throw new Error('GigaCode не найден. Укажите путь к исполняемому файлу в настройках команды.');
   const args = cliArgs(c);
@@ -47,7 +64,7 @@ export const gigacodeAdapter: Adapter = async c => {
     };
     const stop = (error: Error) => { if (failure) return; failure = error; c.logger?.event({ type: 'process-stop', reason: error.message }); kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 1500); killTimer.unref(); };
     const abort = () => stop(new Error('Ход остановлен. Возможные изменения файлов сохранены в рабочем каталоге.'));
-    const timeout = setTimeout(() => stop(new Error(`GigaCode не завершил ход за ${c.cli.timeoutSeconds} секунд.`)), c.cli.timeoutSeconds * 1000);
+    const timeout = setTimeout(() => stop(new Error(`GigaCode не завершил ход за ${c.cli.timeoutSeconds} секунд. При необходимости увеличьте таймаут в настройках CLI и повторите ход.`)), Math.max(1, deadline - Date.now()));
     c.signal.addEventListener('abort', abort, { once: true }); if (c.signal.aborted) abort();
     child.stdout.on('data', chunk => { c.logger?.feed('stdout', chunk); try { decoder.feed(chunk); } catch (e) { stop(e as Error); } });
     child.stderr.on('data', chunk => {
@@ -63,11 +80,12 @@ export const gigacodeAdapter: Adapter = async c => {
       // Keep the group kill armed after cancellation: descendants may outlive the CLI.
       if (!failure && killTimer) clearTimeout(killTimer);
       if (failure) return reject(failure);
-      if (code !== 0) return reject(new Error(errors.message(code)));
+      if (code !== 0) return reject(errors.isModelUnavailable && !decoder.initialized
+        ? new ModelUnavailableError(errors.message(code)) : new Error(errors.message(code)));
       try { resolve(decoder.end(c.participant.cumulativeUsage)); } catch (e) { reject(e); }
     });
   });
-};
+}
 
 export const demoAdapter: Adapter = async c => {
   const { run: r, participant: p } = c;

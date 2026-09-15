@@ -34,6 +34,7 @@ export const messageSchema = z.object({
 export const replySchema = z.object({
   message: z.string().trim().min(1).max(24000),
   actions: z.array(z.discriminatedUnion('type', [
+    z.object({ type: z.literal('continue'), reason: z.string().trim().min(1).max(2000) }).strict(),
     z.object({ type: z.literal('send'), to: id, text: z.string().trim().min(1).max(6000), topicId: id.optional() }).strict(),
     z.object({ type: z.literal('open_topic'), title: short, ownerId: id }).strict(),
     z.object({ type: z.literal('resolve_topic'), topicId: id }).strict(),

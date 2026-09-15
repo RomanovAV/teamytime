@@ -2,18 +2,51 @@ import { StringDecoder } from 'node:string_decoder';
 import type { AgentReply, Usage } from '../../shared/types';
 import { replySchema } from '../validation';
 
+export class ReplyError extends Error {
+  publicMessage: string;
+  constructor(message: string, raw: string) {
+    super(message);
+    this.publicMessage = publicDraft(raw).slice(0, 24000);
+  }
+}
+
+// Locate top-level objects without interpreting braces inside JSON strings.
+function objects(raw: string): string[] {
+  const found: string[] = [];
+  let start = -1, depth = 0, quoted = false, escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (start < 0) { if (c === '{') { start = i; depth = 1; } continue; }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') quoted = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) { found.push(raw.slice(start, i + 1)); start = -1; }
+  }
+  return found;
+}
+
 export function parseReply(raw: string): AgentReply {
   const text = raw.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-  try { return replySchema.parse(JSON.parse(text)); }
-  catch { throw new Error('Агент вернул ответ вне протокола команды. Ход сохранён для повторного запуска.'); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { /* Allow prose around one reply object. */ }
+  const candidates = parsed !== undefined ? [parsed] : objects(text).flatMap(text => {
+    try { return [JSON.parse(text)]; } catch { return []; }
+  }).filter(value => value && ('message' in value || 'actions' in value));
+  if (candidates.length !== 1) throw new ReplyError('Ответ вне протокола команды: нужен один однозначный JSON-объект с message и actions.', raw);
+  const result = replySchema.safeParse(candidates[0]);
+  if (!result.success) throw new ReplyError(`Ответ вне протокола команды: проверьте поля ${result.error.issues.map(i => i.path.join('.') || 'ответ').join(', ')}.`, raw);
+  return result.data;
 }
 
 // Show only the public message, including while its JSON string is incomplete.
 export function publicDraft(raw: string): string {
-  const match = /(?:^\s*|^\s*```json\s*)\{\s*"message"\s*:\s*"/.exec(raw);
+  const match = /\{\s*"message"\s*:\s*"/.exec(raw);
   if (!match) return '';
   let encoded = '';
-  for (let i = match[0].length; i < raw.length; i++) {
+  for (let i = match.index + match[0].length; i < raw.length; i++) {
     const c = raw[i];
     if (c === '"') break;
     if (c === '\\') {
@@ -56,7 +89,8 @@ export class StreamDecoder {
     this.buffer += this.decoder.end(); if (this.buffer.trim()) this.line(this.buffer);
     if (!this.terminal) throw new Error('CLI завершился без итогового события result.');
     if (this.terminal.is_error || this.terminal.subtype !== 'success') throw new Error('GigaCode сообщил об ошибке выполнения хода.');
-    if (this.terminal.permission_denials?.length) throw new Error('Инструменту GigaCode не хватило разрешения. Проверьте выбранную роль и CLI.');
+    const warnings = this.terminal.permission_denials?.length
+      ? ['GigaCode отклонил отдельные вызовы инструментов. Ответ сохранён, но отклонённые проверки не выполнены. Подробности — в отчёте запуска.'] : undefined;
     const cumulative = usage(this.terminal.usage);
     let delta = cumulative;
     if (cumulative && previous) {
@@ -64,7 +98,7 @@ export class StreamDecoder {
       delta = reset ? cumulative : Object.fromEntries(Object.keys(cumulative).map(k => [k, cumulative[k as keyof Usage] - previous[k as keyof Usage]])) as unknown as Usage;
     }
     const raw = typeof this.terminal.result === 'string' ? this.terminal.result : this.assistantText || this.partial;
-    return { reply: parseReply(raw), usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel };
+    return { reply: parseReply(raw), warnings, usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel };
   }
   private line(line: string) {
     if (!line.trim()) return;

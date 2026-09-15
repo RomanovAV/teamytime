@@ -6,6 +6,7 @@ import { Store } from './store';
 import { UserError, createRunSchema, messageSchema, replySchema } from './validation';
 import { demoAdapter, executable, gigacodeAdapter, type Adapter, type AgentResult } from './agents/adapter';
 import { runtimeInfo, TurnLogger } from './diagnostics';
+import { ReplyError } from './agents/protocol';
 
 const now = () => new Date().toISOString();
 const uid = () => randomUUID();
@@ -67,6 +68,7 @@ export class Engine {
   control(id: string, action: string) {
     if (!['pause', 'resume', 'cancel'].includes(action)) throw new UserError('Неизвестное действие.');
     const value = this.store.update(id, action, r => {
+      r.resumeAfterRecovery = false;
       if (action === 'cancel') {
         r.status = 'cancelled'; r.note = 'Задача остановлена пользователем.';
         r.turns.filter(t => t.status === 'queued').forEach(t => t.status = 'cancelled'); return;
@@ -82,7 +84,8 @@ export class Engine {
     if (action === 'cancel') for (const a of this.active.values()) if (a.runId === id) a.abort.abort();
     this.kick(); return value;
   }
-  resolveTurn(id: string, turnId: string, action: string) {
+  resolveTurn(id: string, turnId: string, action: string, resume?: boolean) {
+    if (resume !== undefined && typeof resume !== 'boolean') throw new UserError('Параметр продолжения должен быть логическим.');
     if (!['retry', 'skip'].includes(action)) throw new UserError('Неизвестное действие.');
     const value = this.store.update(id, action, r => {
       if (r.status === 'cancelled') throw new UserError('Задача остановлена.');
@@ -90,7 +93,15 @@ export class Engine {
       if (!t || !['failed', 'interrupted'].includes(t.status)) throw new UserError('Этот ход не требует восстановления.');
       t.status = 'skipped';
       if (action === 'retry') for (const cause of t.causeIds) queue(r, t.agentId, cause, 'Повтор по запросу пользователя');
-      r.note = 'Нажмите «Продолжить», когда проверите оставшиеся ходы.';
+      if (resume !== undefined) r.resumeAfterRecovery = resume;
+      if (r.resumeAfterRecovery && !r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) {
+        r.resumeAfterRecovery = false;
+        if (r.turns.filter(t => t.startedAt).length >= r.team.maxTurns) {
+          r.note = `Достигнут лимит ${r.team.maxTurns} ходов. Создайте новую задачу с большим лимитом.`;
+        } else { r.status = 'running'; r.note = ''; }
+      } else r.note = r.resumeAfterRecovery
+        ? 'Работа продолжится после повтора или пропуска оставшихся ошибочных ходов.'
+        : 'Нажмите «Продолжить», когда проверите оставшиеся ходы.';
     }); this.kick(); return value;
   }
   decide(id: string, decisionId: string, action: string) {
@@ -148,7 +159,7 @@ export class Engine {
     this.active.set(turnId, entry);
     let lastUpdate = 0;
     const update = (reason: string, fn: (r: Run, t: Turn) => void) => this.store.update(runId, reason, r => { const t = r.turns.find(t => t.id === turnId)!; if (t.status === 'running') fn(r, t); });
-    let logger: TurnLogger | undefined;
+    let logger: TurnLogger | undefined, replyText: string | undefined;
     entry.done = Promise.resolve().then(() => {
       const cli = this.store.config().cli;
       this.store.beginDiagnostics(runId, turnId, { startedAt: turn.startedAt, runtime: runtimeInfo(), mode: snapshot.mode, agentId: participant.id, sessionId: participant.sessionId, revision: turn.revision, model: participant.model, cli }, snapshot.workspace);
@@ -159,12 +170,14 @@ export class Engine {
         activity: text => update('activity', (_r, t) => { if (t.activity !== text) t.activity = text; }),
         init: model => update('session', r => { const p = r.participants.find(p => p.id === participant.id)!; p.sessionStarted = true; p.initModel = model; }),
       });
-    }).then(result => { logger?.event({ type: 'adapter-result', ...result }); this.succeed(runId, turnId, result); }).catch(error => {
+    }).then(result => { replyText = result.reply.message; logger?.event({ type: 'adapter-result', ...result }); this.succeed(runId, turnId, result); }).catch(error => {
       this.store.update(runId, 'turn-error', r => {
         const t = r.turns.find(t => t.id === turnId)!;
+        if (replyText) t.draft = replyText;
+        else if (error instanceof ReplyError && error.publicMessage) t.draft = error.publicMessage;
         t.status = r.status === 'cancelled' ? 'cancelled' : this.closing ? 'interrupted' : 'failed';
         t.error = error instanceof Error ? error.message : 'Неизвестная ошибка агента.'; t.finishedAt = now();
-        if (r.status !== 'cancelled') { r.status = this.closing ? 'interrupted' : 'pausing'; r.note = t.error; }
+        if (r.status !== 'cancelled') { r.resumeAfterRecovery = false; r.status = this.closing ? 'interrupted' : 'pausing'; r.note = t.error; }
       });
     }).finally(() => {
       logger?.end();
@@ -176,6 +189,7 @@ export class Engine {
   }
   private validateActions(r: Run, turn: Turn, reply: AgentReply) {
     const lead = turn.agentId === r.team.leadId;
+    if (reply.actions.filter(a => a.type === 'continue').length > 1 || (reply.actions.some(a => a.type === 'continue') && reply.actions.some(a => a.type === 'finish'))) throw new Error('Нельзя одновременно завершить задачу и продолжить свой ход или запросить несколько продолжений.');
     for (const a of reply.actions) {
       if (a.type === 'send' && (a.to === turn.agentId || !r.participants.some(p => p.id === a.to))) throw new Error('Агент указал недопустимого получателя.');
       if (a.type === 'send' && a.topicId && !r.topics.some(t => t.id === a.topicId)) throw new Error('Тема сообщения не найдена.');
@@ -198,7 +212,7 @@ export class Engine {
       if (r.status === 'cancelled' || this.closing) { t.status = 'cancelled'; t.finishedAt = now(); return; }
       const stale = t.revision !== r.revision;
       if (!stale) this.validateActions(r, t, reply);
-      t.status = 'succeeded'; t.finishedAt = now(); t.draft = ''; t.stale = stale; t.usage = result.usage;
+      t.status = 'succeeded'; t.finishedAt = now(); t.draft = ''; t.stale = stale; t.usage = result.usage; t.warnings = result.warnings;
       p.sessionStarted = true; p.actualModel = result.actualModel; p.cumulativeUsage = result.cumulativeUsage;
       message(r, { authorId: p.id, kind: 'agent', text: reply.message, recipientIds: [], turnId, revision: t.revision, stale });
       if (stale) {
@@ -212,6 +226,10 @@ export class Engine {
   }
   private apply(r: Run, t: Turn, a: Action) {
     switch (a.type) {
+      case 'continue': {
+        const m = message(r, { authorId: t.agentId, kind: 'system', text: `Продолжение работы: ${a.reason}`, recipientIds: [t.agentId], turnId: t.id });
+        queue(r, t.agentId, m.id, 'Продолжение работы участника'); break;
+      }
       case 'send': {
         const m = message(r, { authorId: t.agentId, kind: 'agent', text: a.text, recipientIds: [a.to], turnId: t.id, topicId: a.topicId });
         queue(r, a.to, m.id, 'Сообщение коллеги'); break;
@@ -220,7 +238,7 @@ export class Engine {
       case 'resolve_topic': r.topics.find(t => t.id === a.topicId)!.status = 'resolved'; break;
       case 'propose_decision':
         r.decisions.push({ id: uid(), title: a.title, rationale: a.rationale, authorId: t.agentId, status: 'proposed', revision: r.revision, createdAt: now() });
-        if (r.team.checkpoints === 'manual') { r.status = 'pausing'; r.note = 'Команда предложила решение. Проверьте его и продолжите работу.'; } break;
+        if (r.team.checkpoints === 'manual') { r.resumeAfterRecovery = false; r.status = 'pausing'; r.note = 'Команда предложила решение. Проверьте его и продолжите работу.'; } break;
       case 'accept_decision': r.decisions.find(d => d.id === a.decisionId)!.status = 'accepted'; break;
       case 'artifact': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now() }); break;
       case 'finish': r.completion = { summary: a.summary, evidenceIds: a.evidenceIds, revision: r.revision }; break;

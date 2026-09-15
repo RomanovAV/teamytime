@@ -26,6 +26,7 @@ export interface Message {
 export interface Turn {
   id: string; agentId: string; causeIds: string[]; status: TurnStatus; reason: string;
   createdAt: string; startedAt?: string; finishedAt?: string; revision?: number;
+  warnings?: string[];
   draft: string; activity?: string; error?: string; stale?: boolean; usage?: Usage;
 }
 export interface Topic { id: string; title: string; ownerId: string; status: 'open' | 'resolved'; createdAt: string }
@@ -42,6 +43,7 @@ export interface Run {
   note: string; revision: number; createdAt: string; updatedAt: string; workspace: string;
   team: Team; participants: Participant[]; messages: Message[]; turns: Turn[];
   topics: Topic[]; decisions: Decision[]; artifacts: Artifact[];
+  resumeAfterRecovery?: boolean;
   completion?: Completion; finalSummary?: string;
 }
 export interface RunSummary {
@@ -49,6 +51,7 @@ export interface RunSummary {
   updatedAt: string; teamName: string; messageCount: number;
 }
 export type Action =
+  | { type: 'continue'; reason: string }
   | { type: 'send'; to: string; text: string; topicId?: string }
   | { type: 'open_topic'; title: string; ownerId: string }
   | { type: 'resolve_topic'; topicId: string }
