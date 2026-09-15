@@ -5,10 +5,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { AgentReply, Configuration, Participant, Run, Turn, Usage } from '../../shared/types';
 import { StreamDecoder } from './protocol';
 import { buildPrompt, protocol } from './context';
+import type { TurnLogger } from '../diagnostics';
 
 export interface AgentContext {
   run: Run; turn: Turn; participant: Participant; cli: Configuration['cli']; signal: AbortSignal;
   draft: (text: string) => void; activity: (text: string) => void; init: (model?: string) => void;
+  logger?: TurnLogger;
 }
 export interface AgentResult { reply: AgentReply; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string }
 export type Adapter = (context: AgentContext) => Promise<AgentResult>;
@@ -33,6 +35,7 @@ export const gigacodeAdapter: Adapter = async c => {
   const command = executable(c.cli.command);
   if (!command) throw new Error('GigaCode не найден. Укажите путь к исполняемому файлу в настройках команды.');
   const args = cliArgs(c);
+  c.logger?.event({ type: 'process-start', command, args, cwd: c.run.workspace });
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: c.run.workspace, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const decoder = new StreamDecoder(c.participant.sessionId, c.draft, c.init, c.activity);
@@ -40,17 +43,19 @@ export const gigacodeAdapter: Adapter = async c => {
     const kill = (signal: NodeJS.Signals) => {
       try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal); else child.kill(signal); } catch { /* Process already exited. */ }
     };
-    const stop = (error: Error) => { if (failure) return; failure = error; kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 1500); killTimer.unref(); };
+    const stop = (error: Error) => { if (failure) return; failure = error; c.logger?.event({ type: 'process-stop', reason: error.message }); kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 1500); killTimer.unref(); };
     const abort = () => stop(new Error('Ход остановлен. Возможные изменения файлов сохранены в рабочем каталоге.'));
     const timeout = setTimeout(() => stop(new Error(`GigaCode не завершил ход за ${c.cli.timeoutSeconds} секунд.`)), c.cli.timeoutSeconds * 1000);
     c.signal.addEventListener('abort', abort, { once: true }); if (c.signal.aborted) abort();
-    child.stdout.on('data', chunk => { try { decoder.feed(chunk); } catch (e) { stop(e as Error); } });
+    child.stdout.on('data', chunk => { c.logger?.feed('stdout', chunk); try { decoder.feed(chunk); } catch (e) { stop(e as Error); } });
     child.stderr.on('data', chunk => {
-      // Authentication URLs and stderr contents are deliberately not persisted.
+      c.logger?.feed('stderr', chunk);
       if (/auth|login|авториз|вход|device/i.test(chunk.toString())) c.activity('Ожидает авторизации GigaCode. Выполните вход в терминале.');
     });
-    child.on('error', () => { failure = new Error('Не удалось запустить процесс GigaCode. Проверьте путь и права файла.'); });
-    child.on('close', code => {
+    child.on('spawn', () => c.logger?.event({ type: 'process-spawned', pid: child.pid }));
+    child.on('error', error => { c.logger?.event({ type: 'process-error', message: error.message }); failure = new Error('Не удалось запустить процесс GigaCode. Проверьте путь и права файла.'); });
+    child.on('close', (code, signal) => {
+      c.logger?.end(); c.logger?.event({ type: 'process-exit', code, signal });
       clearTimeout(timeout); c.signal.removeEventListener('abort', abort);
       // Keep the group kill armed after cancellation: descendants may outlive the CLI.
       if (!failure && killTimer) clearTimeout(killTimer);

@@ -5,6 +5,7 @@ import type { Action, AgentReply, Message, Run, Turn } from '../shared/types';
 import { Store } from './store';
 import { UserError, createRunSchema, messageSchema, replySchema } from './validation';
 import { demoAdapter, executable, gigacodeAdapter, type Adapter, type AgentResult } from './agents/adapter';
+import { runtimeInfo, TurnLogger } from './diagnostics';
 
 const now = () => new Date().toISOString();
 const uid = () => randomUUID();
@@ -147,19 +148,31 @@ export class Engine {
     this.active.set(turnId, entry);
     let lastUpdate = 0;
     const update = (reason: string, fn: (r: Run, t: Turn) => void) => this.store.update(runId, reason, r => { const t = r.turns.find(t => t.id === turnId)!; if (t.status === 'running') fn(r, t); });
-    entry.done = Promise.resolve().then(() => this.adapters[snapshot.mode]({
-      run: snapshot, turn, participant, cli: this.store.config().cli, signal: abort.signal,
-      draft: text => { if (Date.now() - lastUpdate > 150) { lastUpdate = Date.now(); update('draft', (_r, t) => { t.draft = text; t.activity = 'Формулирует ответ'; }); } },
-      activity: text => update('activity', (_r, t) => { if (t.activity !== text) t.activity = text; }),
-      init: model => update('session', r => { const p = r.participants.find(p => p.id === participant.id)!; p.sessionStarted = true; p.initModel = model; }),
-    })).then(result => { this.succeed(runId, turnId, result); }).catch(error => {
+    let logger: TurnLogger | undefined;
+    entry.done = Promise.resolve().then(() => {
+      const cli = this.store.config().cli;
+      this.store.beginDiagnostics(runId, turnId, { startedAt: turn.startedAt, runtime: runtimeInfo(), mode: snapshot.mode, agentId: participant.id, sessionId: participant.sessionId, revision: turn.revision, model: participant.model, cli }, snapshot.workspace);
+      logger = new TurnLogger((stream, data) => this.store.appendDiagnostic(turnId, stream, data), snapshot.workspace);
+      return this.adapters[snapshot.mode]({
+        run: snapshot, turn, participant, cli, signal: abort.signal, logger,
+        draft: text => { if (Date.now() - lastUpdate > 150) { lastUpdate = Date.now(); update('draft', (_r, t) => { t.draft = text; t.activity = 'Формулирует ответ'; }); } },
+        activity: text => update('activity', (_r, t) => { if (t.activity !== text) t.activity = text; }),
+        init: model => update('session', r => { const p = r.participants.find(p => p.id === participant.id)!; p.sessionStarted = true; p.initModel = model; }),
+      });
+    }).then(result => { logger?.event({ type: 'adapter-result', ...result }); this.succeed(runId, turnId, result); }).catch(error => {
       this.store.update(runId, 'turn-error', r => {
         const t = r.turns.find(t => t.id === turnId)!;
         t.status = r.status === 'cancelled' ? 'cancelled' : this.closing ? 'interrupted' : 'failed';
         t.error = error instanceof Error ? error.message : 'Неизвестная ошибка агента.'; t.finishedAt = now();
         if (r.status !== 'cancelled') { r.status = this.closing ? 'interrupted' : 'pausing'; r.note = t.error; }
       });
-    }).finally(() => { this.active.delete(turnId); this.kick(); });
+    }).finally(() => {
+      logger?.end();
+      const t = this.store.get(runId).turns.find(t => t.id === turnId)!;
+      try { this.store.finishDiagnostics(turnId, { status: t.status, error: t.error, finishedAt: t.finishedAt, loggingError: logger?.error }, snapshot.workspace); }
+      catch { console.error('Не удалось сохранить итог диагностического журнала.'); }
+      this.active.delete(turnId); this.kick();
+    });
   }
   private validateActions(r: Run, turn: Turn, reply: AgentReply) {
     const lead = turn.agentId === r.team.leadId;

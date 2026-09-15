@@ -7,6 +7,7 @@ import { request } from 'node:http';
 import { Store } from '../src/server/store';
 import { Engine } from '../src/server/engine';
 import { createApplication } from '../src/server/http';
+import { gunzipSync } from 'node:zlib';
 
 test('HTTP validates origin and input, persists runs and replays SSE after reconnect', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-http-'));
@@ -22,6 +23,18 @@ test('HTTP validates origin and input, persists runs and replays SSE after recon
     const created = await post('/api/runs', { prompt: 'Тест HTTP', mode: 'demo', teamId: 'default-team' }); assert.equal(created.status, 201);
     const run = await created.json();
     assert.equal((await (await fetch(base + '/api/runs/' + run.id)).json()).prompt, 'Тест HTTP');
+    const reportResponse = await fetch(`${base}/api/runs/${run.id}/report`);
+    assert.equal(reportResponse.status, 200);
+    assert.equal(reportResponse.headers.get('content-type'), 'application/gzip');
+    assert.match(reportResponse.headers.get('content-disposition')!, /attachment; filename="teamytime-run-.*\.json\.gz"/);
+    const report = JSON.parse(gunzipSync(Buffer.from(await reportResponse.arrayBuffer())).toString());
+    assert.equal(report.format, 'teamytime-run-report'); assert.equal(report.formatVersion, 1);
+    assert.equal(report.run.prompt, 'Тест HTTP'); assert.equal(report.run.id, run.id);
+    assert(report.events.items.some((e: any) => e.reason === 'created'));
+    assert.equal(report.diagnostics.turns[0].context.mode, 'demo');
+    assert.equal(report.diagnostics.turns[0].outcome.status, 'succeeded');
+    assert.equal((await fetch(`${base}/api/runs/missing/report`)).status, 404);
+    assert.equal((await fetch(`${base}/api/runs/${run.id}/report`, { headers: { Origin: 'https://evil.example' } })).status, 403);
     const abort = new AbortController();
     const stream = await fetch(base + '/api/events?after=' + boot.cursor, { signal: abort.signal });
     assert.match(stream.headers.get('content-type')!, /text\/event-stream/);

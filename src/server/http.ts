@@ -7,6 +7,11 @@ import { Engine } from './engine';
 import { executable } from './agents/adapter';
 import { configurationSchema, UserError } from './validation';
 import type { AppEvent } from '../shared/types';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
+import { runReport } from './report';
+
+const compress = promisify(gzip);
 
 async function body(req: IncomingMessage) {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new UserError('Требуется JSON.', 415);
@@ -55,6 +60,13 @@ export function createApplication(store: Store, engine: Engine, webDirectory: st
         if (parts.length === 2 && method === 'POST') return json(res, engine.create(await body(req)), 201);
         const id = parts[2];
         if (parts.length === 3 && method === 'GET') return json(res, store.get(id));
+        if (parts.length === 4 && parts[3] === 'report' && method === 'GET') {
+          const report = runReport(store, id);
+          const content = await compress(JSON.stringify(report, null, 2));
+          const filename = `teamytime-run-${id.replace(/[^a-zA-Z0-9-]/g, '_')}.json.gz`;
+          res.writeHead(200, { 'Content-Type': 'application/gzip', 'Content-Disposition': `attachment; filename="${filename}"`, 'Cache-Control': 'no-store' });
+          res.end(content); return;
+        }
         if (parts.length === 4 && method === 'POST') {
           if (parts[3] === 'messages') return json(res, engine.send(id, await body(req)));
           if (parts[3] === 'control') return json(res, engine.control(id, (await body(req)).action));
