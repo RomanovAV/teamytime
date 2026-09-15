@@ -25,5 +25,5 @@ export const defaultConfiguration: Configuration = {
       { id: 'oleg', name: 'Олег', roleId: 'reviewer', model: 'default', notes: '' },
     ],
   }],
-  cli: { command: 'gigacode', timeoutSeconds: 180 },
+  cli: { command: 'gigacode', timeoutSeconds: 600 },
 };

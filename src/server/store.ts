@@ -27,6 +27,20 @@ export class Store {
         created TEXT NOT NULL, stream TEXT NOT NULL, data TEXT NOT NULL, bytes INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS diagnostic_entries_turn ON diagnostic_entries(turn_id,stream,id);`);
     this.db.prepare('INSERT OR IGNORE INTO config VALUES (1,?)').run(JSON.stringify(defaultConfiguration));
+    // Upgrade the former default once; later explicit choices of 180 remain intact.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+      if (version < 1) {
+        const config = this.config();
+        if (config.cli.timeoutSeconds === 180) {
+          config.cli.timeoutSeconds = 600;
+          this.db.prepare('UPDATE config SET json=? WHERE id=1').run(JSON.stringify(config));
+        }
+        this.db.exec('PRAGMA user_version=1');
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error; }
   }
   config(): Configuration { return JSON.parse((this.db.prepare('SELECT json FROM config WHERE id=1').get() as { json: string }).json); }
   saveConfig(value: Configuration) {
