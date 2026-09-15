@@ -6,6 +6,7 @@ import type { AgentReply, Configuration, Participant, Run, Turn, Usage } from '.
 import { StreamDecoder } from './protocol';
 import { buildPrompt, protocol } from './context';
 import type { TurnLogger } from '../diagnostics';
+import { CliErrors } from './cli-errors';
 
 export interface AgentContext {
   run: Run; turn: Turn; participant: Participant; cli: Configuration['cli']; signal: AbortSignal;
@@ -39,6 +40,7 @@ export const gigacodeAdapter: Adapter = async c => {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: c.run.workspace, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const decoder = new StreamDecoder(c.participant.sessionId, c.draft, c.init, c.activity);
+    const errors = new CliErrors();
     let failure: Error | undefined, killTimer: NodeJS.Timeout | undefined;
     const kill = (signal: NodeJS.Signals) => {
       try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal); else child.kill(signal); } catch { /* Process already exited. */ }
@@ -50,17 +52,18 @@ export const gigacodeAdapter: Adapter = async c => {
     child.stdout.on('data', chunk => { c.logger?.feed('stdout', chunk); try { decoder.feed(chunk); } catch (e) { stop(e as Error); } });
     child.stderr.on('data', chunk => {
       c.logger?.feed('stderr', chunk);
-      if (/auth|login|авториз|вход|device/i.test(chunk.toString())) c.activity('Ожидает авторизации GigaCode. Выполните вход в терминале.');
+      errors.feed(chunk, c.activity);
     });
     child.on('spawn', () => c.logger?.event({ type: 'process-spawned', pid: child.pid }));
     child.on('error', error => { c.logger?.event({ type: 'process-error', message: error.message }); failure = new Error('Не удалось запустить процесс GigaCode. Проверьте путь и права файла.'); });
     child.on('close', (code, signal) => {
+      errors.end(c.activity);
       c.logger?.end(); c.logger?.event({ type: 'process-exit', code, signal });
       clearTimeout(timeout); c.signal.removeEventListener('abort', abort);
       // Keep the group kill armed after cancellation: descendants may outlive the CLI.
       if (!failure && killTimer) clearTimeout(killTimer);
       if (failure) return reject(failure);
-      if (code !== 0) return reject(new Error(`GigaCode завершился с кодом ${code ?? 'signal'}. Проверьте вход и совместимость CLI 26.8.41.`));
+      if (code !== 0) return reject(new Error(errors.message(code)));
       try { resolve(decoder.end(c.participant.cumulativeUsage)); } catch (e) { reject(e); }
     });
   });
