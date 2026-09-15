@@ -6,7 +6,7 @@ try {
   assertRuntime();
   const entry = new URL('./dist/server.mjs', import.meta.url);
   try { await access(entry); }
-  catch { throw new Error('Готовая сборка не найдена. Распакуйте архив Teamytime или соберите исходники командой npm run build.'); }
+  catch { throw new Error('Локальная сборка не найдена. Установите зависимости из настроенного реестра: npm ci --include=dev. Затем выполните npm run build.'); }
   const { start } = await import(entry.href);
   await start(fileURLToPath(new URL('./dist/web', import.meta.url)));
 } catch (error) {
