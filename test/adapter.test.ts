@@ -16,7 +16,7 @@ const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session
 if (args.includes('HANG')) { setInterval(() => {}, 1000); }
 else {
  const resumed = args.includes('--resume');
- const reply = JSON.stringify({message: resumed ? 'Продолжение сессии' : 'Новая сессия', actions: []});
+ const reply = resumed ? 'Продолжение сессии' : 'Новая сессия';
  const text = [
   {type:'system',subtype:'init',session_id:id,model:'CodeChat'},
   {type:'assistant',message:{model:'Qwen',content:[{type:'text',text:reply}]}},
@@ -34,6 +34,7 @@ else {
     const first = await gigacodeAdapter(c); assert.equal(first.reply.message, 'Новая сессия'); assert.equal(first.usage?.input, 100);
     p.sessionStarted = true; p.cumulativeUsage = first.cumulativeUsage;
     assert(cliArgs(c).includes('--resume')); assert(cliArgs(c).includes(p.sessionId));
+    assert(!cliArgs(c).some(arg => arg.startsWith('--max-session-turns')));
     const next = await gigacodeAdapter(c); assert.equal(next.reply.message, 'Продолжение сессии'); assert.equal(next.usage?.input, 120);
     p.model = 'HANG'; const hanging = gigacodeAdapter(c); setTimeout(() => abort.abort(), 50);
     await assert.rejects(hanging, /остановлен/);

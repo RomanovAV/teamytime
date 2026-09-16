@@ -28,7 +28,7 @@ export function cliArgs(c: AgentContext): string[] {
     `--approval-mode=${p.role.access === 'execute' ? 'auto-edit' : 'plan'}`,
     ...(p.role.access === 'execute' ? ['--allowed-tools', 'run_shell_command'] : []),
     '--exclude-tools', 'agent', 'save_memory', 'exit_plan_mode', 'ask_user_question',
-    '--max-session-turns', '12', '--output-format', 'stream-json', '--include-partial-messages',
+    '--output-format', 'stream-json', '--include-partial-messages',
     '-p', buildPrompt(c.run, c.turn, p),
   ];
 }

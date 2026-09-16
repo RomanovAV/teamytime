@@ -93,10 +93,10 @@ process.stdout.write(JSON.stringify({type:'system',subtype:'init',session_id:id,
 if (mode === 'broken') { process.stdout.write('not valid JSON\\n'); setInterval(()=>{},1000); }
 else if (mode === 'exit') { process.stderr.write('API_KEY=DO_NOT_EXPORT\\nnetwork unavailable'); process.exitCode=9; }
 else if (mode === 'hang') { process.stderr.write('still waiting\\n'); setInterval(()=>{},1000); }
-else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:id,result:'not a team reply'})); }
+else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:id,result:'@send marina'})); }
 `, { mode: 0o700 });
   const store = new Store(directory), engine = new Engine(store);
-  const config = store.config(); config.cli = { command: script, timeoutSeconds: 1 }; config.teams[0].members[0].model = 'broken'; store.saveConfig(config);
+  const config = store.config(); config.cli = { command: script, timeoutSeconds: 5 }; config.teams[0].members[0].model = 'broken'; store.saveConfig(config);
   const create = (model: string) => {
     const config = store.config(); config.teams[0].members[0].model = model; store.saveConfig(config);
     return engine.create({ prompt: 'Проверка отчёта', mode: 'gigacode', teamId: 'default-team' });
@@ -116,8 +116,9 @@ else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',sess
     assert(!JSON.stringify(exitLog).includes('DO_NOT_EXPORT'));
     const badReply = create('reply'); await until(() => store.get(badReply.id).status === 'paused');
     const replyLog = store.diagnostics(badReply.id)[0];
-    assert(replyLog.entries.some(e => e.data.type === 'result' && e.data.result === 'not a team reply'));
+    assert(replyLog.entries.some(e => e.data.type === 'result' && e.data.result === '@send marina'));
     assert.match(replyLog.outcome.error, /вне протокола/);
+    const timeoutConfig = store.config(); timeoutConfig.cli.timeoutSeconds = 1; store.saveConfig(timeoutConfig);
     const timedOut = create('hang'); await until(() => store.get(timedOut.id).status === 'paused');
     assert.match(store.diagnostics(timedOut.id)[0].outcome.error, /за 1 секунд/);
     const cancelled = create('hang'); await until(() => store.diagnostics(cancelled.id)[0]?.entries.some(e => e.data === 'still waiting') ?? false);

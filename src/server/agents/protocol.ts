@@ -1,6 +1,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import type { AgentReply, Usage } from '../../shared/types';
 import { replySchema } from '../validation';
+import { textReply } from './text-reply';
 
 export class ReplyError extends Error {
   publicMessage: string;
@@ -8,6 +9,24 @@ export class ReplyError extends Error {
     super(message);
     this.publicMessage = publicDraft(raw).slice(0, 24000);
   }
+}
+
+// Old sessions may still answer in JSON during the transition.
+function legacyReply(raw: string): boolean {
+  // A text action may contain JSON examples or a JSON artifact as its body.
+  if (/^\s*@/m.test(raw)) return false;
+  return /^\s*(?:\{|\[|```json)/.test(raw) || /\{\s*"(?:message|actions)"\s*:/.test(raw);
+}
+export function parseReply(raw: string): AgentReply {
+  if (legacyReply(raw)) return parseLegacyReply(raw);
+  try {
+    const result = replySchema.safeParse(textReply(raw));
+    if (!result.success) throw new Error(`Проверьте поля ${result.error.issues.map(i => i.path.join('.') || 'ответ').join(', ')}.`);
+    return result.data;
+  } catch (error) { throw new ReplyError(`Ответ вне протокола команды: ${(error as Error).message}`, raw); }
+}
+export function publicDraft(raw: string): string {
+  return legacyReply(raw) ? legacyDraft(raw) : textReply(raw, true).message;
 }
 
 // Locate top-level objects without interpreting braces inside JSON strings.
@@ -28,7 +47,7 @@ function objects(raw: string): string[] {
   return found;
 }
 
-export function parseReply(raw: string): AgentReply {
+function parseLegacyReply(raw: string): AgentReply {
   const text = raw.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { /* Allow prose around one reply object. */ }
@@ -42,7 +61,7 @@ export function parseReply(raw: string): AgentReply {
 }
 
 // Show only the public message, including while its JSON string is incomplete.
-export function publicDraft(raw: string): string {
+function legacyDraft(raw: string): string {
   const match = /\{\s*"message"\s*:\s*"/.exec(raw);
   if (!match) return '';
   let encoded = '';

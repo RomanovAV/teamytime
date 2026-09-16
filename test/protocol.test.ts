@@ -25,7 +25,7 @@ test('streaming ignores thinking, UTF-8 boundaries and full-response duplication
 test('incomplete JSON string escapes never expose actions', () => {
   assert.equal(publicDraft('{"message":"one\\n\\u0410\\'), 'one\nА');
   assert.equal(publicDraft('{"message":"Hi","actions":[{"type":"send"}]}'), 'Hi');
-  assert.equal(publicDraft('my internal notes'), '');
+  assert.equal(publicDraft('public response'), 'public response');
 });
 test('terminal result and schema validation are mandatory', () => {
   const d = new StreamDecoder('a', () => {}, () => {}, () => {});
@@ -60,4 +60,55 @@ test('successful reply survives permission denials with visible warning; CLI fai
     if (failed) assert.throws(() => d.end(), /ошибке выполнения/);
     else { const result = d.end(); assert.equal(result.reply.message, 'Проверка Git недоступна'); assert.equal(result.warnings?.length, 1); assert(!result.warnings![0].includes('SECRET')); }
   }
+});
+
+test('text replies support every action with multiline bodies', () => {
+  const result = parseReply(`Работа выполнена.
+@send marina topic-1
+Результат проверки
+Вторая строка
+@end
+@continue
+Следующий шаг
+@end
+@open_topic vera
+Проверка тестов
+@end
+@resolve_topic topic-1
+@end
+@propose_decision Выбранный вариант
+Основание выбора
+@end
+@accept_decision decision-1
+@end
+@artifact report.md
+# Отчёт
+Содержимое
+@end
+@finish evidence-1 evidence-2
+Итог работы
+@end
+Последнее замечание.`);
+  assert.equal(result.message, 'Работа выполнена.\nПоследнее замечание.');
+  assert.deepEqual(result.actions.map(a => a.type), ['send', 'continue', 'open_topic', 'resolve_topic', 'propose_decision', 'accept_decision', 'artifact', 'finish']);
+  assert.deepEqual(result.actions[0], { type: 'send', to: 'marina', topicId: 'topic-1', text: 'Результат проверки\nВторая строка' });
+  assert.deepEqual(result.actions[7], { type: 'finish', evidenceIds: ['evidence-1', 'evidence-2'], summary: 'Итог работы' });
+});
+
+test('plain text works, malformed action blocks do not execute', () => {
+  assert.deepEqual(parseReply('Проверка завершена.'), { message: 'Проверка завершена.', actions: [] });
+  for (const raw of ['@send marina\nБез окончания', '@end', '@unknown\nx\n@end', '@send marina\n@continue\nx\n@end', '@send\nx\n@end', '@continue\n@end', '@resolve_topic t\nextra\n@end']) assert.throws(() => parseReply(raw), /протокола/);
+  assert.throws(() => parseReply(Array(9).fill('@continue\nx\n@end').join('\n')), /actions/);
+  assert.equal(parseReply('@send marina\nГотово\n@end').actions.length, 1);
+});
+
+test('code examples and escaped directives stay literal; drafts hide action bodies', () => {
+  const example = 'Пример:\n```text\n@send marina\nНе отправлять\n@end\n```';
+  assert.deepEqual(parseReply(example), { message: example, actions: [] });
+  const raw = 'Ответ.\n@artifact sample.txt\n```text\n@end\n```\n\\@send literal\n@end\nГотово.';
+  const parsed = parseReply(raw);
+  assert.deepEqual(parsed.actions, [{ type: 'artifact', title: 'sample.txt', content: '```text\n@end\n```\n@send literal' }]);
+  assert.equal(parsed.message, 'Ответ.\nГотово.');
+  assert.deepEqual(parseReply('Результат:\n@artifact data.json\n{"message":"example","actions":[]}\n@end').actions, [{ type: 'artifact', title: 'data.json', content: '{"message":"example","actions":[]}' }]);
+  for (const partial of ['Ответ.\n@', 'Ответ.\n@send mar', 'Ответ.\n@send marina\nСкрытый текст', 'Ответ.\n@send marina\nСкрытый текст\n@end']) assert.equal(publicDraft(partial), 'Ответ.');
 });
