@@ -10,6 +10,7 @@ import type { AppEvent } from '../shared/types';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { runReport } from './report';
+import { chooseDirectory } from './directory-picker';
 
 const compress = promisify(gzip);
 
@@ -23,8 +24,9 @@ function json(res: ServerResponse, data: unknown, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data));
 }
 
-export function createApplication(store: Store, engine: Engine, webDirectory: string) {
+export function createApplication(store: Store, engine: Engine, webDirectory: string, pickDirectory = chooseDirectory) {
   const streams = new Set<ServerResponse>();
+  let pickingDirectory = false;
   const server = createServer((req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -42,6 +44,13 @@ export function createApplication(store: Store, engine: Engine, webDirectory: st
         const config = store.config(); return json(res, { config, runs: store.list(), cursor: store.cursor(), cli: { available: !!executable(config.cli.command), command: config.cli.command }, dataDirectory: store.directory });
       }
       if (url.pathname === '/api/config' && method === 'PUT') { store.saveConfig(configurationSchema.parse(await body(req))); return json(res, store.config()); }
+      if (url.pathname === '/api/workspace/choose' && method === 'POST') {
+        await body(req);
+        if (pickingDirectory) throw new UserError('Окно выбора каталога уже открыто.', 409);
+        pickingDirectory = true;
+        try { return json(res, { path: await pickDirectory() }); }
+        finally { pickingDirectory = false; }
+      }
       if (url.pathname === '/api/events' && method === 'GET') {
         const cursor = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? 0);
         if (!Number.isSafeInteger(cursor) || cursor < 0) throw new UserError('Некорректный курсор.');

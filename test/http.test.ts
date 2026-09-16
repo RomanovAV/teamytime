@@ -8,16 +8,34 @@ import { Store } from '../src/server/store';
 import { Engine } from '../src/server/engine';
 import { createApplication } from '../src/server/http';
 import { gunzipSync } from 'node:zlib';
+import { setTimeout as delay } from 'node:timers/promises';
 
 test('HTTP validates origin and input, persists runs and replays SSE after reconnect', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-http-'));
   const store = new Store(directory), engine = new Engine(store, { demo: async () => ({ reply: { message: 'Ответ', actions: [] } }), gigacode: async () => { throw new Error('unused'); } });
-  const app = createApplication(store, engine, path.resolve('dist/web'));
+  let pickerCalls = 0, selectFolder: ((value: string | null) => void) | undefined;
+  const app = createApplication(store, engine, path.resolve('dist/web'), async () => {
+    pickerCalls++;
+    if (pickerCalls === 1) return new Promise<string | null>(resolve => { selectFolder = resolve; });
+    if (pickerCalls === 3) throw new Error('Picker failed');
+    return null;
+  });
   await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
   const post = (url: string, body: unknown, origin?: string) => fetch(base + url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) });
   try {
     const boot = await (await fetch(base + '/api/bootstrap')).json();
+    assert.equal((await post('/api/workspace/choose', {}, 'https://evil.example')).status, 403);
+    assert.equal(pickerCalls, 0);
+    const picking = post('/api/workspace/choose', {});
+    for (let i = 0; !selectFolder && i < 200; i++) await delay(5);
+    assert(selectFolder);
+    assert.equal((await post('/api/workspace/choose', {})).status, 409);
+    selectFolder(directory);
+    assert.deepEqual(await (await picking).json(), { path: directory });
+    assert.deepEqual(await (await post('/api/workspace/choose', {})).json(), { path: null });
+    assert.equal((await post('/api/workspace/choose', {})).status, 500);
+    assert.deepEqual(await (await post('/api/workspace/choose', {})).json(), { path: null });
     assert.equal((await post('/api/runs', {}, 'https://evil.example')).status, 403);
     assert.equal((await post('/api/runs', { prompt: 'x' })).status, 400);
     const created = await post('/api/runs', { prompt: 'Тест HTTP', mode: 'demo', teamId: 'default-team' }); assert.equal(created.status, 201);
