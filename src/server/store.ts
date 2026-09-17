@@ -96,9 +96,11 @@ export class Store {
       const rows = this.db.prepare('SELECT id,bytes FROM diagnostic_entries WHERE turn_id=? AND stream=? ORDER BY id DESC')
         .all(turnId, stream) as { id: number; bytes: number }[];
       let bytes = 0, cutoff: number | undefined, dropped = 0;
+      const maxEntries = stream === 'evidence' ? diagnosticLimits.evidenceEntries : diagnosticLimits.streamEntries;
+      const maxBytes = stream === 'evidence' ? diagnosticLimits.evidenceBytes : diagnosticLimits.streamBytes;
       for (const [index, row] of rows.entries()) {
         bytes += row.bytes;
-        if (index >= diagnosticLimits.streamEntries || bytes > diagnosticLimits.streamBytes) { cutoff ??= row.id; dropped++; }
+        if (index >= maxEntries || bytes > maxBytes) { cutoff ??= row.id; dropped++; }
       }
       if (cutoff !== undefined) {
         this.db.prepare('DELETE FROM diagnostic_entries WHERE turn_id=? AND stream=? AND id<=?').run(turnId, stream, cutoff);

@@ -2,19 +2,26 @@ import type { Action, AgentReply } from '../../shared/types';
 
 function action(header: string, lines: string[]): Action {
   const [name, ...args] = header.slice(1).trim().split(/\s+/);
-  const body = lines.join('\n').trim();
+  let body = lines.join('\n').trim();
+  // Both layouts name the artifact explicitly; never infer missing content or @end.
+  if (['artifact', 'result'].includes(name) && !args.length && lines[0]?.trim()) {
+    args.push(lines[0].trim()); body = lines.slice(1).join('\n').trim();
+  }
   const requireArgs = (min: number, max = min) => {
     if (args.length < min || args.length > max) throw new Error(`Неверные параметры @${name}.`);
   };
   const emptyBody = () => { if (body) throw new Error(`Блок @${name} не принимает текст.`); };
   switch (name) {
     case 'send': requireArgs(1, 2); return { type: 'send', to: args[0], text: body, ...(args[1] ? { topicId: args[1] } : {}) };
+    case 'send_readonly': requireArgs(1, 2); return { type: 'send', to: args[0], text: body, readOnly: true, ...(args[1] ? { topicId: args[1] } : {}) };
     case 'continue': requireArgs(0); return { type: 'continue', reason: body };
     case 'open_topic': requireArgs(1); return { type: 'open_topic', ownerId: args[0], title: body };
     case 'resolve_topic': requireArgs(1); emptyBody(); return { type: 'resolve_topic', topicId: args[0] };
     case 'propose_decision': requireArgs(1, 120); return { type: 'propose_decision', title: args.join(' '), rationale: body };
     case 'accept_decision': requireArgs(1); emptyBody(); return { type: 'accept_decision', decisionId: args[0] };
     case 'artifact': requireArgs(1, 120); return { type: 'artifact', title: args.join(' '), content: body };
+    case 'result': requireArgs(1, 120); return { type: 'result', title: args.join(' '), content: body };
+    case 'publish_artifact': requireArgs(1); emptyBody(); return { type: 'publish_artifact', artifactId: args[0] };
     case 'finish': requireArgs(1, 20); return { type: 'finish', evidenceIds: args, summary: body };
     default: throw new Error(`Неизвестное действие @${name}.`);
   }

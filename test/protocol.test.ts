@@ -102,6 +102,31 @@ test('plain text works, malformed action blocks do not execute', () => {
   assert.equal(parseReply('@send marina\nГотово\n@end').actions.length, 1);
 });
 
+test('run regressions: long review messages and artifact title on next line', () => {
+  for (const length of [6075, 6179, 6665]) assert.equal(parseReply(`@send marina\n${'я'.repeat(length)}\n@end`).actions.length, 1);
+  assert.deepEqual(parseReply('@artifact\nДиагностика и план.md\n# Версия 1.1\nПолный текст\n@end').actions,
+    [{ type: 'artifact', title: 'Диагностика и план.md', content: '# Версия 1.1\nПолный текст' }]);
+  assert.throws(() => parseReply(`@send marina\n${'x'.repeat(24001)}\n@end`), /actions.0.text: превышен лимит 24000/);
+  assert.throws(() => parseReply('@artifact\n@end'), /параметры/);
+  assert.throws(() => parseReply('@continue'), /Не закрыт/);
+  assert.deepEqual(parseReply('@send_readonly vera\nПроверь без правок\n@end').actions,
+    [{ type: 'send', to: 'vera', text: 'Проверь без правок', readOnly: true }]);
+  assert.deepEqual(parseReply('@result\nФинальный отчёт.md\n# Готово\n@end').actions,
+    [{ type: 'result', title: 'Финальный отчёт.md', content: '# Готово' }]);
+  assert.deepEqual(parseReply('@publish_artifact artifact-1\n@end').actions,
+    [{ type: 'publish_artifact', artifactId: 'artifact-1' }]);
+  assert.throws(() => parseReply('@publish_artifact artifact-1\nПояснение\n@end'), /не принимает текст/);
+});
+
+test('invalid reply retains raw text and CLI usage for repair without rerunning tools', () => {
+  const d = new StreamDecoder('a', () => {}, () => {}, () => {});
+  d.feed(Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', result: '@continue', usage: { input_tokens: 100, output_tokens: 20 } })));
+  assert.throws(() => d.end(), error => error instanceof ReplyError && error.raw === '@continue' && error.usage?.total === 120);
+  const truncated = new StreamDecoder('a', () => {}, () => {}, () => {});
+  truncated.feed(Buffer.from('{"type":"stream_event","event":'));
+  assert.throws(() => truncated.end(), /оборвался посреди JSON/);
+});
+
 test('code examples and escaped directives stay literal; drafts hide action bodies', () => {
   const example = 'Пример:\n```text\n@send marina\nНе отправлять\n@end\n```';
   assert.deepEqual(parseReply(example), { message: example, actions: [] });

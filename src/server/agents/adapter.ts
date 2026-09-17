@@ -3,15 +3,18 @@ import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { AgentReply, Configuration, Participant, Run, Turn, Usage } from '../../shared/types';
-import { StreamDecoder } from './protocol';
+import { ReplyError, StreamDecoder } from './protocol';
 import { buildPrompt, protocol } from './context';
 import type { TurnLogger } from '../diagnostics';
 import { CliErrors } from './cli-errors';
+import { prepareArtifacts } from './artifacts';
 
 export interface AgentContext {
   run: Run; turn: Turn; participant: Participant; cli: Configuration['cli']; signal: AbortSignal;
   draft: (text: string) => void; activity: (text: string) => void; init: (model?: string) => void;
   logger?: TurnLogger;
+  promptOverride?: string;
+  protocolRepair?: boolean;
 }
 export interface AgentResult { reply: AgentReply; warnings?: string[]; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string }
 export type Adapter = (context: AgentContext) => Promise<AgentResult>;
@@ -21,31 +24,92 @@ export function executable(command: string): string | undefined {
 }
 export function cliArgs(c: AgentContext): string[] {
   const p = c.participant;
+  const execute = p.role.access === 'execute' && !c.turn.readOnly && !c.protocolRepair;
+  const excluded = ['agent', 'save_memory', 'exit_plan_mode', 'ask_user_question',
+    ...(!execute ? ['edit', 'write_file'] : []),
+    ...(c.protocolRepair ? ['run_shell_command', 'read_file', 'send_message', 'todo_write'] : [])];
   return [
     ...(p.model === 'default' ? [] : ['--model', p.model]),
     '--chat-recording', p.sessionStarted ? '--resume' : '--session-id', p.sessionId,
     '--append-system-prompt', `${p.role.instructions}\n${p.notes}\n${protocol}`,
-    `--approval-mode=${p.role.access === 'execute' ? 'auto-edit' : 'plan'}`,
-    ...(p.role.access === 'execute' ? ['--allowed-tools', 'run_shell_command'] : []),
-    '--exclude-tools', 'agent', 'save_memory', 'exit_plan_mode', 'ask_user_question',
+    `--approval-mode=${execute ? 'auto-edit' : 'plan'}`,
+    ...(execute ? ['--allowed-tools', 'run_shell_command'] : []),
+    '--exclude-tools', ...excluded,
     '--output-format', 'stream-json', '--include-partial-messages',
-    '-p', buildPrompt(c.run, c.turn, p),
+    '-p', c.promptOverride ?? buildPrompt(c.run, c.turn, p),
   ];
 }
 class ModelUnavailableError extends Error {}
+const protocolRepairAttempts = 2;
+
+function addUsage(a?: Usage, b?: Usage): Usage | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return { input: a.input + b.input, output: a.output + b.output, cachedInput: a.cachedInput + b.cachedInput, total: a.total + b.total };
+}
+
+function repairPrompt(error: ReplyError, attempt: number): string {
+  return `Предыдущий ответ отклонён Teamytime из-за формата:\n${error.message}\n\nИсправь предыдущий ответ и верни его целиком ещё раз. Сохрани содержание, адресатов, ID и все необходимые действия. Не повторяй исследование, команды, проверки и изменения файлов; инструменты в этом повторе отключены. Не объясняй ошибку и не добавляй служебный комментарий. Исправь только формат согласно системному протоколу. Это автоматическая попытка ${attempt} из ${protocolRepairAttempts}.`;
+}
 
 export const gigacodeAdapter: Adapter = async c => {
+  await prepareArtifacts(c.run);
   const deadline = Date.now() + c.cli.timeoutSeconds * 1000;
+  let context = c, totalUsage: Usage | undefined, repairCount = 0;
+  const carriedWarnings: string[] = [];
+  while (true) {
+    try {
+      const result = await runWithModelFallback(context, deadline);
+      totalUsage = addUsage(totalUsage, result.usage);
+      const repaired = repairCount ? [`Ответ вне протокола автоматически исправлен с попытки ${repairCount + 1}; инструменты при исправлении были отключены.`] : [];
+      const warnings = [...new Set([...carriedWarnings, ...repaired, ...(result.warnings ?? [])])];
+      return { ...result, usage: totalUsage, warnings: warnings.length ? warnings : undefined };
+    } catch (error) {
+      if (!(error instanceof ReplyError)) throw error;
+      totalUsage = addUsage(totalUsage, error.usage);
+      carriedWarnings.push(...(error.warnings ?? []));
+      if (repairCount >= protocolRepairAttempts || c.signal.aborted) {
+        error.usage = totalUsage;
+        error.warnings = [...new Set([...carriedWarnings, `Автоматические попытки исправления протокола (${protocolRepairAttempts}) исчерпаны.`])];
+        throw error;
+      }
+      repairCount++;
+      c.activity(`Исправляет формат ответа (${repairCount}/${protocolRepairAttempts})`);
+      c.logger?.event({ type: 'protocol-retry', attempt: repairCount, maxAttempts: protocolRepairAttempts, error: error.message });
+      context = {
+        ...c,
+        protocolRepair: true,
+        promptOverride: repairPrompt(error, repairCount),
+        participant: {
+          ...c.participant,
+          sessionStarted: true,
+          cumulativeUsage: error.cumulativeUsage ?? context.participant.cumulativeUsage,
+          model: error.modelFallback ? 'default' : context.participant.model,
+        },
+      };
+    }
+  }
+};
+
+async function runWithModelFallback(c: AgentContext, deadline: number): Promise<AgentResult> {
   try { return await runGigacode(c, deadline); }
   catch (error) {
     if (!(error instanceof ModelUnavailableError) || c.participant.model === 'default' || c.signal.aborted) throw error;
     const warning = `Указанная модель «${c.participant.model}» отсутствует в каталоге GigaCode. Использована модель по умолчанию CLI.`;
     c.activity('Указанная модель недоступна. Повторяю с моделью по умолчанию CLI.');
     c.logger?.event({ type: 'model-fallback', requestedModel: c.participant.model, fallbackModel: 'default' });
-    const result = await runGigacode({ ...c, participant: { ...c.participant, model: 'default' } }, deadline);
-    return { ...result, warnings: [warning, ...(result.warnings ?? [])] };
+    try {
+      const result = await runGigacode({ ...c, participant: { ...c.participant, model: 'default' } }, deadline);
+      return { ...result, warnings: [warning, ...(result.warnings ?? [])] };
+    } catch (fallbackError) {
+      if (fallbackError instanceof ReplyError) {
+        fallbackError.modelFallback = true;
+        fallbackError.warnings = [warning, ...(fallbackError.warnings ?? [])];
+      }
+      throw fallbackError;
+    }
   }
-};
+}
 
 async function runGigacode(c: AgentContext, deadline: number): Promise<AgentResult> {
   if (c.signal.aborted) throw new Error('Ход остановлен.');
@@ -101,6 +165,7 @@ export const demoAdapter: Adapter = async c => {
     if (artifacts.length && review) {
       reply = { message: 'Команда прошла демонстрационный цикл: поручения, результат и проверка. Реальная задача в этом режиме не выполнялась.', actions: [
         ...r.decisions.filter(d => d.revision === r.revision && d.status === 'proposed').slice(0, 3).map(d => ({ type: 'accept_decision' as const, decisionId: d.id })),
+        { type: 'publish_artifact', artifactId: artifacts[0].id },
         { type: 'finish', summary: 'Демонстрация завершена. Сохранены диалог, решение и пример результата. Для выполнения вашей задачи создайте запуск в режиме GigaCode.', evidenceIds: [review.id] },
       ] };
     } else if (!r.turns.some(t => t.agentId === lead && t.revision === r.revision && t.status === 'succeeded')) {

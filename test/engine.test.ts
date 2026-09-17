@@ -68,7 +68,7 @@ test('demo completes through addressed messages, persists results and native ide
   try {
     const r = f.create(); await until(() => f.store.get(r.id).status === 'completed');
     const done = f.store.get(r.id);
-    assert(done.artifacts.length > 0); assert(done.decisions.every(d => d.status === 'accepted'));
+    assert(done.artifacts.length > 0); assert(done.artifacts.some(a => a.kind === 'result' && a.authorId !== done.team.leadId)); assert(done.decisions.every(d => d.status === 'accepted'));
     assert(done.messages.some(m => m.recipientIds.includes('oleg') && m.appliedBy.includes('oleg')));
     assert.equal(new Set(done.participants.map(p => p.sessionId)).size, 4);
     assert(done.participants.every(p => p.sessionStarted));
@@ -164,5 +164,99 @@ test('global turn budget stops self-sustaining message loops', async () => {
     const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
     assert.equal(f.store.get(r.id).turns.filter(t => t.startedAt).length, 4);
     assert.throws(() => f.engine.control(r.id, 'resume'), /Лимит ходов/);
+  } finally { await f.close(); }
+});
+
+test('protocol repair validates all actions, preserves usage and never invokes the adapter again', async () => {
+  const { ReplyError } = await import('../src/server/agents/protocol');
+  let calls = 0;
+  const f = fixture(async () => {
+    calls++;
+    const error = new ReplyError('Ответ вне протокола: нет @end', '@artifact result.md\nDone');
+    error.usage = error.cumulativeUsage = { input: 100, output: 20, total: 120, cachedInput: 0 };
+    throw error;
+  });
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+    const turn = f.store.get(r.id).turns[0];
+    assert.equal(turn.rawReply, '@artifact result.md\nDone');
+    assert.equal(turn.usage?.total, 120);
+    assert.throws(() => f.engine.repairTurn(r.id, turn.id, '@artifact result.md\nDone\n@end\n@send missing\nhello\n@end'), /получателя/);
+    assert.equal(f.store.get(r.id).artifacts.length, 0);
+    f.engine.repairTurn(r.id, turn.id, '@artifact result.md\nDone\n@end', true);
+    await until(() => f.store.get(r.id).status === 'waiting');
+    const result = f.store.get(r.id);
+    assert.equal(calls, 1); assert.equal(result.turns.length, 1); assert.equal(result.artifacts.length, 1); assert.equal(result.artifacts[0].kind, 'working');
+    assert.equal(result.turns[0].usage?.total, 120); assert.equal(result.turns[0].rawReply, undefined);
+    assert.throws(() => f.engine.repairTurn(r.id, turn.id, 'Again'), /нет ответа/);
+    assert.equal(f.store.diagnostics(r.id)[0].outcome.repaired, true);
+  } finally { await f.close(); }
+});
+
+test('protocol repair rejects stale requirements and preserves the failed answer', async () => {
+  const { ReplyError } = await import('../src/server/agents/protocol');
+  const f = fixture(async () => { throw new ReplyError('bad format', '@continue'); });
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+    f.engine.send(r.id, { kind: 'update', text: 'Новые требования' });
+    assert.throws(() => f.engine.repairTurn(r.id, r.turns[0].id, 'Done'), /Требования изменились/);
+    assert.equal(f.store.get(r.id).turns[0].status, 'failed');
+  } finally { await f.close(); }
+});
+
+test('read-only delegation cannot elevate access and persists across continuation and retry', async () => {
+  const calls: AgentContext[] = [];
+  const f = fixture(async c => {
+    calls.push(c);
+    if (calls.length === 1) return { reply: { message: 'Диагностика', actions: [{ type: 'send', to: 'vera', text: 'Проверить', readOnly: true }] } };
+    assert.equal(c.turn.readOnly, true);
+    if (calls.length === 2) return { reply: { message: 'Дальше', actions: [{ type: 'continue', reason: 'Ещё проверка' }] } };
+    if (calls.length === 3) throw new Error('failed');
+    if (calls.length === 4) return { reply: { message: 'Передать', actions: [{ type: 'send', to: 'alex', text: 'Проверить тоже', readOnly: false }] } };
+    return { reply: { message: 'Готово', actions: [] } };
+  });
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+    const failed = f.store.get(r.id).turns.find(t => t.status === 'failed')!;
+    f.engine.resolveTurn(r.id, failed.id, 'retry', true);
+    await until(() => f.store.get(r.id).status === 'waiting');
+    assert.equal(calls.length, 5);
+    assert(calls.slice(1).every(c => c.turn.readOnly));
+  } finally { await f.close(); }
+});
+
+test('queued diagnostic and execution requests never coalesce into a writing turn', async () => {
+  const f = fixture(async () => ({ reply: { message: 'done', actions: [] } }));
+  try {
+    const r = f.create(); f.engine.control(r.id, 'pause');
+    f.engine.send(r.id, { kind: 'message', recipientId: 'vera', text: 'Диагностика', readOnly: true });
+    f.engine.send(r.id, { kind: 'message', recipientId: 'vera', text: 'Реализация', readOnly: false });
+    const turns = f.store.get(r.id).turns.filter(t => t.agentId === 'vera');
+    assert.equal(turns.length, 2); assert.deepEqual(turns.map(t => t.readOnly), [true, false]);
+  } finally { await f.close(); }
+});
+
+test('diagnostic scope survives user status messages and accepted decisions until explicitly changed', async () => {
+  const f = fixture(async () => ({ reply: { message: 'done', actions: [] } }));
+  try {
+    const r = f.engine.create({ prompt: 'Диагностика', teamId: 'default-team', mode: 'demo', readOnly: true });
+    f.engine.control(r.id, 'pause');
+    f.engine.send(r.id, { kind: 'message', text: 'Как дела?' });
+    f.store.update(r.id, 'fixture', r => { r.decisions.push({ id: 'd', title: 'План', rationale: 'Проверка', authorId: 'marina', status: 'proposed', revision: 1, createdAt: 'now' }); });
+    f.engine.decide(r.id, 'd', 'accept');
+    assert(f.store.get(r.id).turns.every(t => t.readOnly));
+    f.engine.send(r.id, { kind: 'message', text: 'Теперь реализуй', readOnly: false });
+    assert.equal(f.store.get(r.id).turns.at(-1)!.readOnly, false);
+  } finally { await f.close(); }
+});
+
+test('only the lead can create or publish final result artifacts', async () => {
+  const f = fixture(async c => c.participant.id === 'marina'
+    ? { reply: { message: 'Передаю исполнителю', actions: [{ type: 'send', to: 'vera', text: 'Подготовь финальный документ' }] } }
+    : { reply: { message: 'Пытаюсь опубликовать', actions: [{ type: 'result', title: 'result.md', content: 'Не утверждено координатором' }] } });
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+    const state = f.store.get(r.id), failed = state.turns.find(t => t.agentId === 'vera' && t.status === 'failed');
+    assert(failed); assert.match(failed.error!, /Только ведущий/); assert.equal(state.artifacts.length, 0);
   } finally { await f.close(); }
 });

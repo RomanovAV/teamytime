@@ -33,7 +33,8 @@ test('diagnostics redact complete fragmented UTF-8 lines, nested credentials, re
   for (const secret of ['PRIVATE_REASONING', 'KEY_SECRET', 'SPLIT_SECRET', 'NESTED_SECRET', 'BEARER_SECRET', 'AUTH_SECRET', 'ASSIGNMENT_SECRET', '/private/workspace']) assert(!serialized.includes(secret), secret);
   assert(serialized.includes('Привет')); assert(!serialized.includes('�'));
   assert(serialized.includes('[WORKSPACE]/result.md'));
-  assert.equal(entries.filter(e => e.stream === 'stdout').length, 4);
+  assert.equal(entries.filter(e => e.stream === 'stdout').length, 2);
+  assert.equal(entries.filter(e => e.stream === 'evidence').length, 2);
   assert.equal(entries.at(-2)?.data, 'not stream-json: Привет');
   assert.deepEqual(redact({ input_tokens: 17, output_tokens: 2, token: 'secret' }), { input_tokens: 17, output_tokens: 2, token: '[REDACTED]' });
 });
@@ -129,5 +130,25 @@ else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',sess
     await until(() => !!store.diagnostics(cancelled.id)[0].outcome);
     assert.equal(store.diagnostics(cancelled.id)[0].outcome.status, 'cancelled');
     assert(store.diagnostics(cancelled.id)[0].entries.some(e => e.data.type === 'process-exit' && e.data.signal === 'SIGTERM'));
+  } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('partial deltas never evict earlier tool evidence or a large final artifact', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'teamytime-evidence-'));
+  const store = new Store(directory), engine = new Engine(store);
+  try {
+    const run = engine.create({ prompt: 'Проверить журнал', mode: 'demo', teamId: 'default-team' }); engine.control(run.id, 'pause');
+    store.beginDiagnostics(run.id, run.turns[0].id, {}, run.workspace);
+    const logger = new TurnLogger((stream, data) => store.appendDiagnostic(run.turns[0].id, stream, data), run.workspace);
+    logger.feed('stdout', Buffer.from(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'edit', input: { file_path: 'file.txt', new_string: 'edited' } }] } }) + '\n'));
+    logger.feed('stdout', Buffer.from(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: false, content: 'edit succeeded' }] } }) + '\n'));
+    for (let i = 0; i < 700; i++) logger.feed('stdout', Buffer.from(JSON.stringify({ type: 'stream_event', event: { delta: { type: 'text_delta', text: 'x' } } }) + '\n'));
+    logger.feed('stdout', Buffer.from(JSON.stringify({ type: 'result', result: 'Я'.repeat(50000) }) + '\n'));
+    logger.end();
+    const logs = store.diagnostics(run.id)[0];
+    assert.equal(logs.entries.filter(e => e.stream === 'evidence').length, 3);
+    assert(logs.entries.some(e => e.data.type === 'assistant'));
+    assert(logs.entries.some(e => e.data.type === 'result' && e.data.result.length === 50000));
+    assert(logs.droppedEntries > 0);
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

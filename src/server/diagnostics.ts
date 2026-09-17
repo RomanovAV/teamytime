@@ -2,8 +2,8 @@ import { StringDecoder } from 'node:string_decoder';
 import { homedir, release } from 'node:os';
 import pkg from '../../package.json';
 
-export type DiagnosticStream = 'stdout' | 'stderr' | 'event';
-export const diagnosticLimits = { lineBytes: 64 * 1024, streamBytes: 512 * 1024, streamEntries: 512 };
+export type DiagnosticStream = 'stdout' | 'stderr' | 'event' | 'evidence';
+export const diagnosticLimits = { lineBytes: 1024 * 1024, streamBytes: 512 * 1024, streamEntries: 512, evidenceBytes: 8 * 1024 * 1024, evidenceEntries: 4096 };
 export const runtimeInfo = () => ({ appVersion: pkg.version, node: process.version, platform: process.platform, arch: process.arch, osRelease: release() });
 const secretKey = /^(?:authorization|proxy.authorization|cookie|set.cookie|password|passwd|client.secret|api.?key|(?:access|refresh|id).?token|token|secret|user.code|device.code|verification.uri(?:.complete)?|login.url|auth.url)$/i;
 const secretAssignment = /((?:authorization|cookie|password|passwd|client_secret|api[_-]?key|access_token|refresh_token|id_token|token|secret|user_code|device_code)\s*["']?\s*[:=]\s*["']?)([^\s"'\\,;}\]]+)/gi;
@@ -85,6 +85,9 @@ export class TurnLogger {
   private line(stream: 'stdout' | 'stderr', line: string) {
     let data: unknown = line;
     if (stream === 'stdout') { try { data = JSON.parse(line); } catch { /* Preserve malformed output for diagnosis. */ } }
-    this.write(stream, redact(data, this.workspace));
+    const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
+    // Full messages/tool results have their own budget; partial deltas cannot evict them.
+    const important = stream === 'stdout' && ['assistant', 'user', 'result', 'system'].includes(type ?? '');
+    this.write(important ? 'evidence' : stream, redact(data, this.workspace));
   }
 }

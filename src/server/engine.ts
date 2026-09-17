@@ -6,14 +6,15 @@ import { Store } from './store';
 import { UserError, createRunSchema, messageSchema, replySchema } from './validation';
 import { demoAdapter, executable, gigacodeAdapter, type Adapter, type AgentResult } from './agents/adapter';
 import { runtimeInfo, TurnLogger } from './diagnostics';
-import { ReplyError } from './agents/protocol';
+import { parseReply, ReplyError } from './agents/protocol';
+import { snapshotWorkspace, compareWorkspace } from './workspace-audit';
 
 const now = () => new Date().toISOString();
 const uid = () => randomUUID();
-function queue(r: Run, agentId: string, causeId: string, reason: string) {
-  const pending = r.turns.find(t => t.agentId === agentId && t.status === 'queued');
+function queue(r: Run, agentId: string, causeId: string, reason: string, readOnly = false) {
+  const pending = r.turns.find(t => t.agentId === agentId && t.status === 'queued' && !!t.readOnly === readOnly);
   if (pending) { if (!pending.causeIds.includes(causeId)) pending.causeIds.push(causeId); return; }
-  r.turns.push({ id: uid(), agentId, causeIds: [causeId], status: 'queued', reason, createdAt: now(), draft: '' });
+  r.turns.push({ id: uid(), agentId, causeIds: [causeId], status: 'queued', reason, createdAt: now(), draft: '', readOnly });
 }
 function message(r: Run, fields: Pick<Message, 'authorId' | 'kind' | 'text' | 'recipientIds'> & Partial<Message>): Message {
   const m: Message = { id: uid(), deliveredTo: [], appliedBy: [], revision: r.revision, createdAt: now(), ...fields };
@@ -21,7 +22,7 @@ function message(r: Run, fields: Pick<Message, 'authorId' | 'kind' | 'text' | 'r
 }
 
 export class Engine {
-  private active = new Map<string, { runId: string; agentId: string; workspace: string; write: boolean; abort: AbortController; done: Promise<void> }>();
+  private active = new Map<string, { runId: string; agentId: string; workspace: string; write: boolean; readOnly: boolean; abort: AbortController; done: Promise<void> }>();
   private scheduled = false;
   private closing = false;
   constructor(readonly store: Store, private adapters: Record<Run['mode'], Adapter> = { demo: demoAdapter, gigacode: gigacodeAdapter }) {}
@@ -45,8 +46,8 @@ export class Engine {
       participants: team.members.map(m => ({ ...m, role: structuredClone(config.roles.find(role => role.id === m.roleId)!), sessionId: uid(), sessionStarted: false })),
       messages: [], turns: [], topics: [], decisions: [], artifacts: [],
     };
-    const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId] });
-    queue(run, team.leadId, m.id, 'Новая задача'); this.store.create(run); this.kick(); return run;
+    const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId], readOnly: data.readOnly });
+    queue(run, team.leadId, m.id, 'Новая задача', data.readOnly); this.store.create(run); this.kick(); return run;
   }
   send(id: string, input: unknown) {
     const data = messageSchema.parse(input);
@@ -58,8 +59,9 @@ export class Engine {
         r.revision++; r.completion = undefined; r.finalSummary = undefined;
         r.decisions.filter(d => d.status !== 'rejected').forEach(d => d.status = 'needs_review');
       }
-      const m = message(r, { authorId: null, kind: 'user', text: data.text, recipientIds: recipients });
-      recipients.forEach(to => queue(r, to, m.id, data.kind === 'update' ? 'Уточнение требований' : 'Сообщение пользователя'));
+      const readOnly = data.readOnly ?? !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly;
+      const m = message(r, { authorId: null, kind: 'user', text: data.text, recipientIds: recipients, readOnly });
+      recipients.forEach(to => queue(r, to, m.id, data.kind === 'update' ? 'Уточнение требований' : 'Сообщение пользователя', readOnly));
       r.completion = undefined; r.finalSummary = undefined;
       if (['waiting', 'completed'].includes(r.status)) { r.status = 'running'; r.note = ''; }
     });
@@ -92,7 +94,7 @@ export class Engine {
       const t = r.turns.find(t => t.id === turnId);
       if (!t || !['failed', 'interrupted'].includes(t.status)) throw new UserError('Этот ход не требует восстановления.');
       t.status = 'skipped';
-      if (action === 'retry') for (const cause of t.causeIds) queue(r, t.agentId, cause, 'Повтор по запросу пользователя');
+      if (action === 'retry') for (const cause of t.causeIds) queue(r, t.agentId, cause, 'Повтор по запросу пользователя', t.readOnly);
       if (resume !== undefined) r.resumeAfterRecovery = resume;
       if (r.resumeAfterRecovery && !r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) {
         r.resumeAfterRecovery = false;
@@ -104,14 +106,38 @@ export class Engine {
         : 'Нажмите «Продолжить», когда проверите оставшиеся ходы.';
     }); this.kick(); return value;
   }
+  repairTurn(id: string, turnId: string, text: unknown, resume?: boolean) {
+    if (typeof text !== 'string' || text.length > 128000) throw new UserError('Исправленный ответ должен быть текстом до 128000 символов.');
+    if (resume !== undefined && typeof resume !== 'boolean') throw new UserError('Параметр продолжения должен быть логическим.');
+    const run = this.store.get(id), turn = run.turns.find(t => t.id === turnId);
+    if (run.status === 'cancelled' || !turn || turn.status !== 'failed' || turn.rawReply === undefined) throw new UserError('У этого хода нет ответа для исправления.');
+    if (turn.revision !== run.revision) throw new UserError('Требования изменились. Старый ответ нельзя применить: повторите или пропустите ход.');
+    if (this.isActive(id)) throw new UserError('Дождитесь окончания активных ходов перед исправлением ответа.');
+    let reply: AgentReply;
+    try { reply = parseReply(text); this.validateActions(run, turn, reply); }
+    catch (error) { throw new UserError((error as Error).message); }
+    // Same validation/transaction as a live reply; no CLI call and no repeated file operations.
+    this.succeed(id, turnId, { reply, usage: turn.usage, warnings: turn.warnings, cumulativeUsage: run.participants.find(p => p.id === turn.agentId)!.cumulativeUsage });
+    const value = this.store.update(id, 'reply-repaired', r => {
+      const repaired = r.turns.find(t => t.id === turnId)!;
+      repaired.error = undefined; repaired.rawReply = undefined;
+      if (resume && !r.turns.some(t => ['failed', 'interrupted'].includes(t.status)) && !(r.team.checkpoints === 'manual' && reply.actions.some(a => a.type === 'propose_decision'))) {
+        r.status = 'running'; r.note = '';
+      } else { r.status = 'paused'; r.note = 'Ответ исправлен и применён. Нажмите «Продолжить», когда будете готовы.'; }
+    });
+    this.store.appendDiagnostic(turnId, 'event', { type: 'reply-repaired', at: now() });
+    this.store.finishDiagnostics(turnId, { status: 'succeeded', finishedAt: value.turns.find(t => t.id === turnId)!.finishedAt, repaired: true }, run.workspace);
+    this.kick(); return value;
+  }
   decide(id: string, decisionId: string, action: string) {
     if (!['accept', 'reject'].includes(action)) throw new UserError('Неизвестное решение.');
     const value = this.store.update(id, 'decision', r => {
       if (r.status === 'cancelled') throw new UserError('Задача остановлена.');
       const d = r.decisions.find(d => d.id === decisionId); if (!d) throw new UserError('Решение не найдено.');
       d.status = action === 'accept' ? 'accepted' : 'rejected'; d.revision = r.revision;
-      const m = message(r, { authorId: null, kind: 'user', text: `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».`, recipientIds: [r.team.leadId] });
-      queue(r, r.team.leadId, m.id, 'Решение пользователя');
+      const readOnly = !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly;
+      const m = message(r, { authorId: null, kind: 'user', text: `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».`, recipientIds: [r.team.leadId], readOnly });
+      queue(r, r.team.leadId, m.id, 'Решение пользователя', readOnly);
       r.completion = undefined;
       if (['completed', 'waiting'].includes(r.status)) r.status = 'running';
     }); this.kick(); return value;
@@ -135,7 +161,8 @@ export class Engine {
         }
         const p = r.participants.find(p => p.id === t.agentId)!;
         if (active.some(a => a.runId === r.id && a.agentId === p.id)) continue;
-        if (p.role.access === 'execute' && active.some(a => a.write && a.workspace === r.workspace)) continue;
+        const writing = p.role.access === 'execute' && !t.readOnly;
+        if (active.some(a => a.workspace === r.workspace && ((writing && (a.write || a.readOnly)) || (t.readOnly && a.write)))) continue;
         this.start(r.id, t.id); started++;
       }
       const fresh = this.store.get(r.id);
@@ -155,26 +182,38 @@ export class Engine {
     });
     const turn = snapshot.turns.find(t => t.id === turnId)!, participant = snapshot.participants.find(p => p.id === turn.agentId)!;
     const abort = new AbortController();
-    const entry = { runId, agentId: participant.id, workspace: snapshot.workspace, write: participant.role.access === 'execute', abort, done: Promise.resolve() };
+    const entry = { runId, agentId: participant.id, workspace: snapshot.workspace, write: participant.role.access === 'execute' && !turn.readOnly, readOnly: !!turn.readOnly, abort, done: Promise.resolve() };
     this.active.set(turnId, entry);
     let lastUpdate = 0;
     const update = (reason: string, fn: (r: Run, t: Turn) => void) => this.store.update(runId, reason, r => { const t = r.turns.find(t => t.id === turnId)!; if (t.status === 'running') fn(r, t); });
     let logger: TurnLogger | undefined, replyText: string | undefined;
-    entry.done = Promise.resolve().then(() => {
+    entry.done = Promise.resolve().then(async () => {
       const cli = this.store.config().cli;
       this.store.beginDiagnostics(runId, turnId, { startedAt: turn.startedAt, runtime: runtimeInfo(), mode: snapshot.mode, agentId: participant.id, sessionId: participant.sessionId, revision: turn.revision, model: participant.model, cli }, snapshot.workspace);
       logger = new TurnLogger((stream, data) => this.store.appendDiagnostic(turnId, stream, data), snapshot.workspace);
-      return this.adapters[snapshot.mode]({
+      const before = snapshot.mode === 'gigacode' ? await snapshotWorkspace(snapshot.workspace) : undefined;
+      try { return await this.adapters[snapshot.mode]({
         run: snapshot, turn, participant, cli, signal: abort.signal, logger,
         draft: text => { if (Date.now() - lastUpdate > 150) { lastUpdate = Date.now(); update('draft', (_r, t) => { t.draft = text; t.activity = 'Формулирует ответ'; }); } },
         activity: text => update('activity', (_r, t) => { if (t.activity !== text) t.activity = text; }),
         init: model => update('session', r => { const p = r.participants.find(p => p.id === participant.id)!; p.sessionStarted = true; p.initModel = model; }),
-      });
+      }); } finally {
+        if (before) {
+          const changes = compareWorkspace(before, await snapshotWorkspace(snapshot.workspace));
+          update('workspace-audit', (_r, t) => { t.workspaceChanges = changes; });
+          logger.event({ type: 'workspace-audit', ...changes });
+          if (turn.readOnly && changes.files.length) throw new Error('Во время хода «без изменений» изменились файлы. Действия ответа не применены. Проверьте изменения в отчёте; автоматического отката нет.');
+        }
+      }
     }).then(result => { replyText = result.reply.message; logger?.event({ type: 'adapter-result', ...result }); this.succeed(runId, turnId, result); }).catch(error => {
       this.store.update(runId, 'turn-error', r => {
         const t = r.turns.find(t => t.id === turnId)!;
         if (replyText) t.draft = replyText;
-        else if (error instanceof ReplyError && error.publicMessage) t.draft = error.publicMessage;
+        else if (error instanceof ReplyError) {
+          t.draft = error.publicMessage; t.rawReply = error.raw; t.usage = error.usage; t.warnings = error.warnings;
+          const p = r.participants.find(p => p.id === t.agentId)!;
+          p.cumulativeUsage = error.cumulativeUsage ?? p.cumulativeUsage; p.actualModel = error.actualModel ?? p.actualModel;
+        }
         t.status = r.status === 'cancelled' ? 'cancelled' : this.closing ? 'interrupted' : 'failed';
         t.error = error instanceof Error ? error.message : 'Неизвестная ошибка агента.'; t.finishedAt = now();
         if (r.status !== 'cancelled') { r.resumeAfterRecovery = false; r.status = this.closing ? 'interrupted' : 'pausing'; r.note = t.error; }
@@ -196,6 +235,8 @@ export class Engine {
       if (a.type === 'open_topic' && !r.participants.some(p => p.id === a.ownerId)) throw new Error('Владелец темы не найден.');
       if (a.type === 'resolve_topic' && !r.topics.some(t => t.id === a.topicId && (lead || t.ownerId === turn.agentId))) throw new Error('Агент не может закрыть эту тему.');
       if (a.type === 'accept_decision' && (!lead || !r.decisions.some(d => d.id === a.decisionId && d.status === 'proposed' && d.revision === r.revision))) throw new Error('Агент не может принять это решение.');
+      if (a.type === 'result' && !lead) throw new Error('Только ведущий может создать финальный результат. Передайте материал ведущему через @artifact и @send.');
+      if (a.type === 'publish_artifact' && (!lead || !r.artifacts.some(artifact => artifact.id === a.artifactId && artifact.revision === r.revision))) throw new Error('Ведущий может опубликовать только существующий материал текущей версии требований.');
       if (a.type === 'finish') {
         if (!lead) throw new Error('Завершить задачу может только ведущий.');
         const evidence = a.evidenceIds.map(id => r.messages.find(m => m.id === id));
@@ -213,7 +254,7 @@ export class Engine {
       const stale = t.revision !== r.revision;
       if (!stale) this.validateActions(r, t, reply);
       t.status = 'succeeded'; t.finishedAt = now(); t.draft = ''; t.stale = stale; t.usage = result.usage; t.warnings = result.warnings;
-      p.sessionStarted = true; p.actualModel = result.actualModel; p.cumulativeUsage = result.cumulativeUsage;
+      p.sessionStarted = true; p.actualModel = result.actualModel ?? p.actualModel; p.cumulativeUsage = result.cumulativeUsage ?? p.cumulativeUsage;
       message(r, { authorId: p.id, kind: 'agent', text: reply.message, recipientIds: [], turnId, revision: t.revision, stale });
       if (stale) {
         if (p.role.access === 'execute') { r.status = 'pausing'; r.note = 'Исполнитель завершил ход по старым требованиям. Проверьте изменения файлов перед продолжением.'; }
@@ -228,11 +269,11 @@ export class Engine {
     switch (a.type) {
       case 'continue': {
         const m = message(r, { authorId: t.agentId, kind: 'system', text: `Продолжение работы: ${a.reason}`, recipientIds: [t.agentId], turnId: t.id });
-        queue(r, t.agentId, m.id, 'Продолжение работы участника'); break;
+        queue(r, t.agentId, m.id, 'Продолжение работы участника', t.readOnly); break;
       }
       case 'send': {
-        const m = message(r, { authorId: t.agentId, kind: 'agent', text: a.text, recipientIds: [a.to], turnId: t.id, topicId: a.topicId });
-        queue(r, a.to, m.id, 'Сообщение коллеги'); break;
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: a.text, recipientIds: [a.to], turnId: t.id, topicId: a.topicId, readOnly: !!t.readOnly || !!a.readOnly });
+        queue(r, a.to, m.id, 'Сообщение коллеги', !!t.readOnly || !!a.readOnly); break;
       }
       case 'open_topic': r.topics.push({ id: uid(), title: a.title, ownerId: a.ownerId, status: 'open', createdAt: now() }); break;
       case 'resolve_topic': r.topics.find(t => t.id === a.topicId)!.status = 'resolved'; break;
@@ -240,7 +281,9 @@ export class Engine {
         r.decisions.push({ id: uid(), title: a.title, rationale: a.rationale, authorId: t.agentId, status: 'proposed', revision: r.revision, createdAt: now() });
         if (r.team.checkpoints === 'manual') { r.resumeAfterRecovery = false; r.status = 'pausing'; r.note = 'Команда предложила решение. Проверьте его и продолжите работу.'; } break;
       case 'accept_decision': r.decisions.find(d => d.id === a.decisionId)!.status = 'accepted'; break;
-      case 'artifact': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now() }); break;
+      case 'artifact': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now(), kind: 'working' }); break;
+      case 'result': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now(), kind: 'result' }); break;
+      case 'publish_artifact': r.artifacts.find(artifact => artifact.id === a.artifactId)!.kind = 'result'; break;
       case 'finish': r.completion = { summary: a.summary, evidenceIds: a.evidenceIds, revision: r.revision }; break;
     }
   }

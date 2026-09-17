@@ -22,11 +22,15 @@ export interface Message {
   id: string; authorId: string | null; kind: 'user' | 'agent' | 'system'; text: string;
   recipientIds: string[]; deliveredTo: string[]; appliedBy: string[];
   revision: number; createdAt: string; turnId?: string; topicId?: string; stale?: boolean;
+  readOnly?: boolean;
 }
 export interface Turn {
   id: string; agentId: string; causeIds: string[]; status: TurnStatus; reason: string;
   createdAt: string; startedAt?: string; finishedAt?: string; revision?: number;
   warnings?: string[];
+  readOnly?: boolean;
+  rawReply?: string;
+  workspaceChanges?: { files: { path: string; change: 'added' | 'modified' | 'deleted' }[]; incomplete: boolean; note?: string };
   draft: string; activity?: string; error?: string; stale?: boolean; usage?: Usage;
 }
 export interface Topic { id: string; title: string; ownerId: string; status: 'open' | 'resolved'; createdAt: string }
@@ -36,6 +40,7 @@ export interface Decision {
 }
 export interface Artifact {
   id: string; title: string; content: string; authorId: string; revision: number; createdAt: string;
+  kind?: 'working' | 'result';
 }
 export interface Completion { summary: string; evidenceIds: string[]; revision: number }
 export interface Run {
@@ -52,12 +57,14 @@ export interface RunSummary {
 }
 export type Action =
   | { type: 'continue'; reason: string }
-  | { type: 'send'; to: string; text: string; topicId?: string }
+  | { type: 'send'; to: string; text: string; topicId?: string; readOnly?: boolean }
   | { type: 'open_topic'; title: string; ownerId: string }
   | { type: 'resolve_topic'; topicId: string }
   | { type: 'propose_decision'; title: string; rationale: string }
   | { type: 'accept_decision'; decisionId: string }
   | { type: 'artifact'; title: string; content: string }
+  | { type: 'result'; title: string; content: string }
+  | { type: 'publish_artifact'; artifactId: string }
   | { type: 'finish'; summary: string; evidenceIds: string[] };
 export interface AgentReply { message: string; actions: Action[] }
 export interface AppEvent { id: number; runId: string | null; reason: string; createdAt: string }

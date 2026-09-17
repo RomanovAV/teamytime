@@ -2,10 +2,25 @@ import { StringDecoder } from 'node:string_decoder';
 import type { AgentReply, Usage } from '../../shared/types';
 import { replySchema } from '../validation';
 import { textReply } from './text-reply';
+import type { ZodError } from 'zod';
+
+function validationMessage(error: ZodError): string {
+  return error.issues.map(issue => {
+    const field = issue.path.join('.') || 'ответ';
+    if (issue.code === 'too_big') return `${field}: превышен лимит ${issue.maximum} ${issue.origin === 'array' ? 'элементов' : 'символов'}. Сократите поле или вынесите подробности в @artifact.`;
+    if (issue.code === 'too_small') return `${field}: нужно не менее ${issue.minimum} ${issue.origin === 'array' ? 'элементов' : 'символов'}.`;
+    return `${field}: ${issue.message}`;
+  }).join(' ');
+}
 
 export class ReplyError extends Error {
   publicMessage: string;
-  constructor(message: string, raw: string) {
+  usage?: Usage;
+  cumulativeUsage?: Usage;
+  actualModel?: string;
+  warnings?: string[];
+  modelFallback?: boolean;
+  constructor(message: string, public raw: string) {
     super(message);
     this.publicMessage = publicDraft(raw).slice(0, 24000);
   }
@@ -21,7 +36,7 @@ export function parseReply(raw: string): AgentReply {
   if (legacyReply(raw)) return parseLegacyReply(raw);
   try {
     const result = replySchema.safeParse(textReply(raw));
-    if (!result.success) throw new Error(`Проверьте поля ${result.error.issues.map(i => i.path.join('.') || 'ответ').join(', ')}.`);
+    if (!result.success) throw new Error(validationMessage(result.error));
     return result.data;
   } catch (error) { throw new ReplyError(`Ответ вне протокола команды: ${(error as Error).message}`, raw); }
 }
@@ -56,7 +71,7 @@ function parseLegacyReply(raw: string): AgentReply {
   }).filter(value => value && ('message' in value || 'actions' in value));
   if (candidates.length !== 1) throw new ReplyError('Ответ вне протокола команды: нужен один однозначный JSON-объект с message и actions.', raw);
   const result = replySchema.safeParse(candidates[0]);
-  if (!result.success) throw new ReplyError(`Ответ вне протокола команды: проверьте поля ${result.error.issues.map(i => i.path.join('.') || 'ответ').join(', ')}.`, raw);
+  if (!result.success) throw new ReplyError(`Ответ вне протокола команды: ${validationMessage(result.error)}`, raw);
   return result.data;
 }
 
@@ -105,7 +120,11 @@ export class StreamDecoder {
     }
   }
   end(previous?: Usage) {
-    this.buffer += this.decoder.end(); if (this.buffer.trim()) this.line(this.buffer);
+    this.buffer += this.decoder.end();
+    if (this.buffer.trim()) {
+      try { JSON.parse(this.buffer); } catch { throw new Error('Поток CLI оборвался посреди JSON-события. Итог хода не подтверждён.'); }
+      this.line(this.buffer);
+    }
     if (!this.terminal) throw new Error('CLI завершился без итогового события result.');
     if (this.terminal.is_error || this.terminal.subtype !== 'success') throw new Error('GigaCode сообщил об ошибке выполнения хода.');
     const warnings = this.terminal.permission_denials?.length
@@ -117,7 +136,12 @@ export class StreamDecoder {
       delta = reset ? cumulative : Object.fromEntries(Object.keys(cumulative).map(k => [k, cumulative[k as keyof Usage] - previous[k as keyof Usage]])) as unknown as Usage;
     }
     const raw = typeof this.terminal.result === 'string' ? this.terminal.result : this.assistantText || this.partial;
-    return { reply: parseReply(raw), warnings, usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel };
+    try {
+      return { reply: parseReply(raw), warnings, usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel };
+    } catch (error) {
+      if (error instanceof ReplyError) Object.assign(error, { usage: delta, cumulativeUsage: cumulative, actualModel: this.actualModel, warnings });
+      throw error;
+    }
   }
   private line(line: string) {
     if (!line.trim()) return;

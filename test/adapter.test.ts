@@ -85,3 +85,56 @@ if (model !== 'default' || fs.existsSync('fail-default')) {
     await assert.rejects(gigacodeAdapter(c), /остановлен/); assert.equal(attempts().length, before + 4);
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('protocol errors are retried in the same session without tools and usage is counted once', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-protocol-retry-'));
+  const script = path.join(directory, 'gigacode');
+  writeFileSync(script, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const attempts = fs.existsSync('attempts.jsonl') ? fs.readFileSync('attempts.jsonl', 'utf8').trim().split('\\n').filter(Boolean).length : 0;
+fs.appendFileSync('attempts.jsonl', JSON.stringify(args) + '\\n');
+const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];
+const repair = args[args.indexOf('-p') + 1].includes('Предыдущий ответ отклонён Teamytime');
+const result = attempts === 0 ? '@send marina\\n' + 'x'.repeat(24001) + '\\n@end' : 'Исправленный ответ';
+process.stdout.write(JSON.stringify({type:'system',subtype:'init',session_id:id,model:'TestModel'})+'\\n');
+process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:id,result,usage:{input_tokens:repair?160:100,output_tokens:repair?20:10}}));
+`, { mode: 0o700 });
+  const store = new Store(directory), engine = new Engine(store);
+  try {
+    const run = engine.create({ prompt: 'Проверить автоповтор', teamId: 'default-team', mode: 'demo', workspace: directory }); engine.control(run.id, 'pause');
+    const activities: string[] = [];
+    const c: AgentContext = { run, turn: run.turns[0], participant: run.participants[0], cli: { command: script, timeoutSeconds: 10 },
+      signal: new AbortController().signal, draft: () => {}, init: () => {}, activity: text => activities.push(text) };
+    const result = await gigacodeAdapter(c);
+    const attempts = readFileSync(path.join(directory, 'attempts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
+    assert.equal(result.reply.message, 'Исправленный ответ'); assert.equal(attempts.length, 2);
+    assert(attempts[0].includes('--session-id')); assert(attempts[1].includes('--resume'));
+    assert(attempts[1].includes('--approval-mode=plan')); assert(!attempts[1].includes('--allowed-tools'));
+    for (const tool of ['run_shell_command', 'read_file', 'send_message', 'todo_write', 'edit', 'write_file']) assert(attempts[1].includes(tool));
+    assert.match(attempts[1][attempts[1].indexOf('-p') + 1], /actions\.0\.text: превышен лимит 24000/);
+    assert.equal(result.usage?.total, 180); assert.equal(result.cumulativeUsage?.total, 180);
+    assert(result.warnings?.some(warning => warning.includes('автоматически исправлен')));
+    assert(activities.some(activity => activity.includes('Исправляет формат ответа (1/2)')));
+  } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('protocol retry is bounded and preserves the final raw reply for manual repair', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-protocol-bounded-'));
+  const script = path.join(directory, 'gigacode');
+  writeFileSync(script, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2); fs.appendFileSync('attempts.jsonl', JSON.stringify(args) + '\\n');
+const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];
+const count = fs.readFileSync('attempts.jsonl', 'utf8').trim().split('\\n').length;
+process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:id,result:'@continue',usage:{input_tokens:count*100,output_tokens:count*10}}));
+`, { mode: 0o700 });
+  const store = new Store(directory), engine = new Engine(store);
+  try {
+    const run = engine.create({ prompt: 'Проверить лимит', teamId: 'default-team', mode: 'demo', workspace: directory }); engine.control(run.id, 'pause');
+    const c: AgentContext = { run, turn: run.turns[0], participant: run.participants[0], cli: { command: script, timeoutSeconds: 10 },
+      signal: new AbortController().signal, draft: () => {}, init: () => {}, activity: () => {} };
+    await assert.rejects(gigacodeAdapter(c), error => error instanceof Error && (error as any).raw === '@continue' && (error as any).usage.total === 330);
+    assert.equal(readFileSync(path.join(directory, 'attempts.jsonl'), 'utf8').trim().split('\n').length, 3);
+  } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});

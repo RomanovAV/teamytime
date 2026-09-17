@@ -68,3 +68,27 @@ test('HTTP validates origin and input, persists runs and replays SSE after recon
     app.closeStreams(); await engine.close(); await new Promise<void>(resolve => app.server.close(() => resolve())); store.close(); rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('HTTP repairs saved protocol replies atomically without executing another turn', async () => {
+  const { ReplyError } = await import('../src/server/agents/protocol');
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-http-repair-'));
+  const store = new Store(directory); let calls = 0;
+  const adapter = async () => { calls++; throw new ReplyError('Не закрыт блок', '@artifact result.md\nDone'); };
+  const engine = new Engine(store, { demo: adapter, gigacode: adapter });
+  const app = createApplication(store, engine, path.resolve('dist/web'));
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
+  try {
+    const run = engine.create({ prompt: 'Исправить формат', mode: 'demo', teamId: 'default-team' });
+    for (let i = 0; store.get(run.id).status !== 'paused' && i < 200; i++) await delay(5);
+    assert.equal(store.get(run.id).status, 'paused');
+    const post = (text: string) => fetch(`${base}/api/runs/${run.id}/turns/${run.turns[0].id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'repair', text, resume: false }) });
+    assert.equal((await post('@artifact result.md\nDone')).status, 400);
+    assert.equal(store.get(run.id).artifacts.length, 0);
+    assert.equal((await post('@artifact result.md\nDone\n@end')).status, 200);
+    assert.equal(store.get(run.id).artifacts.length, 1); assert.equal(calls, 1);
+    assert.equal((await post('@artifact result.md\nDone\n@end')).status, 400);
+  } finally {
+    app.closeStreams(); await engine.close(); await new Promise<void>(resolve => app.server.close(() => resolve())); store.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});

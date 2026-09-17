@@ -81,7 +81,10 @@ export function createApplication(store: Store, engine: Engine, webDirectory: st
           if (parts[3] === 'control') return json(res, engine.control(id, (await body(req)).action));
         }
         if (parts.length === 5 && method === 'POST') {
-          if (parts[3] === 'turns') { const data = await body(req); return json(res, engine.resolveTurn(id, parts[4], data.action, data.resume)); }
+          if (parts[3] === 'turns') {
+            const data = await body(req);
+            return json(res, data.action === 'repair' ? engine.repairTurn(id, parts[4], data.text, data.resume) : engine.resolveTurn(id, parts[4], data.action, data.resume));
+          }
           if (parts[3] === 'decisions') return json(res, engine.decide(id, parts[4], (await body(req)).action));
         }
         if (parts.length === 5 && parts[3] === 'artifacts' && method === 'GET') {
