@@ -8,6 +8,35 @@ import { Engine } from '../src/server/engine';
 import { gigacodeAdapter, cliArgs, type AgentContext } from '../src/server/agents/adapter';
 import { protocol } from '../src/server/agents/context';
 
+test('subagents are available in plan and editing turns but excluded during protocol repair', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-subagents-'));
+  const store = new Store(directory), engine = new Engine(store);
+  try {
+    const run = engine.create({ prompt: 'Изучить код', teamId: 'default-team', mode: 'demo' }); engine.control(run.id, 'pause');
+    for (const access of ['discuss', 'execute'] as const) {
+      for (const readOnly of [false, true]) {
+        for (const protocolRepair of [false, true]) {
+          const c: AgentContext = { run, turn: { ...run.turns[0], readOnly },
+            participant: { ...run.participants[0], role: { ...run.participants[0].role, access } },
+            protocolRepair, cli: { command: 'gigacode', timeoutSeconds: 10 },
+            signal: new AbortController().signal, draft: () => {}, init: () => {}, activity: () => {} };
+          const args = cliArgs(c), excluded = args.slice(args.indexOf('--exclude-tools') + 1, args.indexOf('--output-format'));
+          const editing = access === 'execute' && !readOnly && !protocolRepair;
+          const subagents = !protocolRepair;
+          assert.equal(excluded.includes('agent'), !subagents, JSON.stringify({ access, readOnly, protocolRepair }));
+          assert(args.includes(`--approval-mode=${editing ? 'auto-edit' : 'plan'}`));
+          assert.equal(excluded.includes('edit'), !editing); assert.equal(excluded.includes('write_file'), !editing);
+          assert(excluded.includes('exit_plan_mode')); assert.equal(args.includes('--allowed-tools'), editing);
+          assert(args[args.indexOf('--append-system-prompt') + 1].endsWith(!subagents
+            ? 'В текущем ходе субагенты отключены.'
+            : editing ? 'В текущем ходе разрешены субагенты для анализа и выполнения работы, включая правки файлов в рамках поручения.'
+              : 'В текущем ходе разрешены субагенты для чтения, поиска и анализа в режиме plan.'));
+        }
+      }
+    }
+  } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('real process adapter uses stable sessions, handles fragmented output, and cancels', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-cli-'));
   const script = path.join(directory, 'gigacode');
@@ -117,7 +146,7 @@ process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:
     assert.deepEqual(result.contextCheckpoint, { sessionId: c.participant.sessionId, messageIds: [run.messages[0].id] });
     assert(attempts[0].includes('--session-id')); assert(attempts[1].includes('--resume'));
     assert(attempts[1].includes('--approval-mode=plan')); assert(!attempts[1].includes('--allowed-tools'));
-    for (const tool of ['run_shell_command', 'read_file', 'send_message', 'todo_write', 'edit', 'write_file']) assert(attempts[1].includes(tool));
+    for (const tool of ['agent', 'run_shell_command', 'read_file', 'send_message', 'todo_write', 'edit', 'write_file']) assert(attempts[1].includes(tool));
     assert.match(attempts[1][attempts[1].indexOf('-p') + 1], /actions\.0\.text: превышен лимит 24000/);
     assert.equal(result.usage?.total, 180); assert.equal(result.cumulativeUsage?.total, 180);
     assert(result.warnings?.some(warning => warning.includes('автоматически исправлен')));

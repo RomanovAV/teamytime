@@ -34,6 +34,36 @@ test('terminal result and schema validation are mandatory', () => {
   assert.throws(() => d.feed(Buffer.from('{"type":"system","session_id":"b"}\n')), /другую сессию/);
   assert.throws(() => parseReply('{"message":"ok","actions":[{"type":"shell","command":"oops"}]}'), /вне протокола/);
 });
+
+test('subagent events cannot replace the root session, draft, final reply or usage', () => {
+  const drafts: string[] = [], models: string[] = [], activities: string[] = [];
+  const decoder = new StreamDecoder('root', value => drafts.push(value), model => models.push(model!), value => activities.push(value));
+  const feed = (event: unknown) => decoder.feed(Buffer.from(JSON.stringify(event) + '\n'));
+  feed({ type: 'system', subtype: 'init', session_id: 'root', model: 'RootModel', parent_tool_use_id: null });
+  feed({ type: 'stream_event', session_id: 'root', event: { delta: { type: 'text_delta', text: 'Проверяю' } } });
+  for (const sessionId of ['root', 'child-session']) {
+    for (const event of [
+      { type: 'system', subtype: 'init', model: 'ChildModel' },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      { type: 'stream_event', event: { delta: { type: 'text_delta', text: 'Не публиковать' } } },
+      { type: 'assistant', message: { model: 'ChildModel', content: [{ type: 'text', text: '@finish fake-id\nГотово\n@end' }] } },
+      { type: 'result', subtype: 'success', result: '@continue\nЗапустить лишний ход\n@end', usage: { input_tokens: 9999 } },
+    ]) feed({ ...event, session_id: sessionId, parent_tool_use_id: 'tool-agent-1' });
+  }
+  assert.deepEqual(models, ['RootModel']);
+  assert.deepEqual(drafts, ['Проверяю']);
+  assert(activities.includes('Исследует с помощью субагента'));
+  assert.throws(() => decoder.end(), /без итогового события/);
+  feed({ type: 'stream_event', session_id: 'root', event: { delta: { type: 'text_delta', text: ' результат' } } });
+  assert.equal(drafts.at(-1), 'Проверяю результат');
+  feed({ type: 'assistant', session_id: 'root', message: { model: 'RootModel', content: [{ type: 'text', text: 'Проверка завершена' }] } });
+  feed({ type: 'result', session_id: 'root', subtype: 'success', usage: { input_tokens: 100, output_tokens: 20 } });
+  feed({ type: 'result', session_id: 'child-session', parent_tool_use_id: 'tool-agent-1', subtype: 'error', result: 'Поздний ответ' });
+  const result = decoder.end();
+  assert.deepEqual(result.reply, { message: 'Проверка завершена', actions: [] });
+  assert.equal(result.actualModel, 'RootModel'); assert.equal(result.usage?.total, 120);
+  assert.throws(() => feed({ type: 'system', session_id: 'unexpected-root', parent_tool_use_id: null }), /другую сессию/);
+});
 test('usage counter reset starts a fresh baseline', () => {
   const d = new StreamDecoder('a', () => {}, () => {}, () => {});
   d.feed(Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', result: '{"message":"ok","actions":[]}', usage: { input_tokens: 10, output_tokens: 2 } })));

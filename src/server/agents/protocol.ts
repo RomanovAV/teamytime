@@ -147,6 +147,12 @@ export class StreamDecoder {
     if (!line.trim()) return;
     let data: any;
     try { data = JSON.parse(line); } catch { throw new Error('CLI прислал некорректный stream-json.'); }
+    // Nested tool-call events are not the participant's reply, identity or usage.
+    // Keep the root session check strict for events without a child marker.
+    if (typeof data.parent_tool_use_id === 'string' && data.parent_tool_use_id.length) {
+      this.onActivity('Исследует с помощью субагента');
+      return;
+    }
     if (data.session_id && data.session_id !== this.sessionId) throw new Error('CLI вернул другую сессию. Продолжение остановлено.');
     if (data.type === 'system' && data.subtype === 'init') {
       this.initialized = true; this.initModel = data.model; this.onInit(this.initModel);

@@ -25,13 +25,18 @@ export function executable(command: string): string | undefined {
 export function cliArgs(c: AgentContext): string[] {
   const p = c.participant;
   const execute = p.role.access === 'execute' && !c.turn.readOnly && !c.protocolRepair;
-  const excluded = ['agent', 'save_memory', 'exit_plan_mode', 'ask_user_question',
+  // Delegation follows the participant's effective access. Format repair must not run work again.
+  const excluded = ['save_memory', 'exit_plan_mode', 'ask_user_question',
+    ...(c.protocolRepair ? ['agent'] : []),
     ...(!execute ? ['edit', 'write_file'] : []),
     ...(c.protocolRepair ? ['run_shell_command', 'read_file', 'send_message', 'todo_write'] : [])];
   return [
     ...(p.model === 'default' ? [] : ['--model', p.model]),
     '--chat-recording', p.sessionStarted ? '--resume' : '--session-id', p.sessionId,
-    '--append-system-prompt', `${p.role.instructions}\n${p.notes}\n${protocol}`,
+    '--append-system-prompt', `${p.role.instructions}\n${p.notes}\n${protocol}\n${c.protocolRepair
+      ? 'В текущем ходе субагенты отключены.'
+      : execute ? 'В текущем ходе разрешены субагенты для анализа и выполнения работы, включая правки файлов в рамках поручения.'
+        : 'В текущем ходе разрешены субагенты для чтения, поиска и анализа в режиме plan.'}`,
     `--approval-mode=${execute ? 'auto-edit' : 'plan'}`,
     ...(execute ? ['--allowed-tools', 'run_shell_command'] : []),
     '--exclude-tools', ...excluded,
