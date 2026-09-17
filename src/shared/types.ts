@@ -14,9 +14,11 @@ export interface Configuration {
 export type RunStatus = 'running' | 'pausing' | 'paused' | 'waiting' | 'completed' | 'cancelled' | 'interrupted';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted' | 'cancelled' | 'skipped';
 export interface Usage { input: number; output: number; cachedInput: number; total: number }
+export interface ContextCheckpoint { sessionId: string; messageIds: string[] }
 export interface Participant extends Member {
   role: Role; sessionId: string; sessionStarted: boolean;
   initModel?: string; actualModel?: string; cumulativeUsage?: Usage;
+  contextCheckpoint?: ContextCheckpoint;
 }
 export interface Message {
   id: string; authorId: string | null; kind: 'user' | 'agent' | 'system'; text: string;

@@ -255,6 +255,7 @@ export class Engine {
       if (!stale) this.validateActions(r, t, reply);
       t.status = 'succeeded'; t.finishedAt = now(); t.draft = ''; t.stale = stale; t.usage = result.usage; t.warnings = result.warnings;
       p.sessionStarted = true; p.actualModel = result.actualModel ?? p.actualModel; p.cumulativeUsage = result.cumulativeUsage ?? p.cumulativeUsage;
+      if (result.contextCheckpoint) p.contextCheckpoint = result.contextCheckpoint;
       message(r, { authorId: p.id, kind: 'agent', text: reply.message, recipientIds: [], turnId, revision: t.revision, stale });
       if (stale) {
         if (p.role.access === 'execute') { r.status = 'pausing'; r.note = 'Исполнитель завершил ход по старым требованиям. Проверьте изменения файлов перед продолжением.'; }

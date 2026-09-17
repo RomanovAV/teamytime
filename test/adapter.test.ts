@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Store } from '../src/server/store';
 import { Engine } from '../src/server/engine';
 import { gigacodeAdapter, cliArgs, type AgentContext } from '../src/server/agents/adapter';
+import { protocol } from '../src/server/agents/context';
 
 test('real process adapter uses stable sessions, handles fragmented output, and cancels', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-cli-'));
@@ -31,7 +32,11 @@ else {
     const run = engine.create({ prompt: 'Проверка адаптера', teamId: 'default-team', mode: 'demo' }); engine.control(run.id, 'pause');
     const p = run.participants[0]; const abort = new AbortController();
     const c: AgentContext = { run, turn: run.turns[0], participant: p, cli: { command: script, timeoutSeconds: 10 }, signal: abort.signal, draft: () => {}, init: () => {}, activity: () => {} };
+    const args = cliArgs(c);
+    assert(args[args.indexOf('--append-system-prompt') + 1].includes(protocol));
+    assert(!args[args.indexOf('-p') + 1].includes(protocol));
     const first = await gigacodeAdapter(c); assert.equal(first.reply.message, 'Новая сессия'); assert.equal(first.usage?.input, 100);
+    assert.deepEqual(first.contextCheckpoint, { sessionId: p.sessionId, messageIds: [run.messages[0].id] });
     p.sessionStarted = true; p.cumulativeUsage = first.cumulativeUsage;
     assert(cliArgs(c).includes('--resume')); assert(cliArgs(c).includes(p.sessionId));
     assert(!cliArgs(c).some(arg => arg.startsWith('--max-session-turns')));
@@ -109,6 +114,7 @@ process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:
     const result = await gigacodeAdapter(c);
     const attempts = readFileSync(path.join(directory, 'attempts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
     assert.equal(result.reply.message, 'Исправленный ответ'); assert.equal(attempts.length, 2);
+    assert.deepEqual(result.contextCheckpoint, { sessionId: c.participant.sessionId, messageIds: [run.messages[0].id] });
     assert(attempts[0].includes('--session-id')); assert(attempts[1].includes('--resume'));
     assert(attempts[1].includes('--approval-mode=plan')); assert(!attempts[1].includes('--allowed-tools'));
     for (const tool of ['run_shell_command', 'read_file', 'send_message', 'todo_write', 'edit', 'write_file']) assert(attempts[1].includes(tool));

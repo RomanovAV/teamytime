@@ -2,9 +2,9 @@ import { spawn } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { AgentReply, Configuration, Participant, Run, Turn, Usage } from '../../shared/types';
+import type { AgentReply, Configuration, ContextCheckpoint, Participant, Run, Turn, Usage } from '../../shared/types';
 import { ReplyError, StreamDecoder } from './protocol';
-import { buildPrompt, protocol } from './context';
+import { buildContext, buildPrompt, protocol } from './context';
 import type { TurnLogger } from '../diagnostics';
 import { CliErrors } from './cli-errors';
 import { prepareArtifacts } from './artifacts';
@@ -16,7 +16,7 @@ export interface AgentContext {
   promptOverride?: string;
   protocolRepair?: boolean;
 }
-export interface AgentResult { reply: AgentReply; warnings?: string[]; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string }
+export interface AgentResult { reply: AgentReply; warnings?: string[]; usage?: Usage; cumulativeUsage?: Usage; initModel?: string; actualModel?: string; contextCheckpoint?: ContextCheckpoint }
 export type Adapter = (context: AgentContext) => Promise<AgentResult>;
 export function executable(command: string): string | undefined {
   const choices = command.includes('/') ? [path.resolve(command)] : (process.env.PATH ?? '').split(path.delimiter).map(p => path.join(p, command));
@@ -54,8 +54,9 @@ function repairPrompt(error: ReplyError, attempt: number): string {
 
 export const gigacodeAdapter: Adapter = async c => {
   await prepareArtifacts(c.run);
+  const prepared = buildContext(c.run, c.turn, c.participant);
   const deadline = Date.now() + c.cli.timeoutSeconds * 1000;
-  let context = c, totalUsage: Usage | undefined, repairCount = 0;
+  let context = { ...c, promptOverride: c.promptOverride ?? prepared.prompt }, totalUsage: Usage | undefined, repairCount = 0;
   const carriedWarnings: string[] = [];
   while (true) {
     try {
@@ -63,7 +64,7 @@ export const gigacodeAdapter: Adapter = async c => {
       totalUsage = addUsage(totalUsage, result.usage);
       const repaired = repairCount ? [`Ответ вне протокола автоматически исправлен с попытки ${repairCount + 1}; инструменты при исправлении были отключены.`] : [];
       const warnings = [...new Set([...carriedWarnings, ...repaired, ...(result.warnings ?? [])])];
-      return { ...result, usage: totalUsage, warnings: warnings.length ? warnings : undefined };
+      return { ...result, contextCheckpoint: c.promptOverride ? undefined : prepared.checkpoint, usage: totalUsage, warnings: warnings.length ? warnings : undefined };
     } catch (error) {
       if (!(error instanceof ReplyError)) throw error;
       totalUsage = addUsage(totalUsage, error.usage);

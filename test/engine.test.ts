@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../src/server/store';
 import { Engine } from '../src/server/engine';
 import type { Adapter, AgentContext, AgentResult } from '../src/server/agents/adapter';
+import { buildContext } from '../src/server/agents/context';
 
 export async function until(fn: () => boolean, timeout = 7000) { const start = Date.now(); while (!fn()) { if (Date.now() - start > timeout) throw new Error('Timed out'); await delay(10); } }
 function fixture(adapter?: Adapter) {
@@ -15,6 +16,43 @@ function fixture(adapter?: Adapter) {
   const create = () => engine.create({ prompt: 'Проверить совместную работу команды', teamId: 'default-team', mode: 'demo' });
   return { directory, store, engine, create, async close() { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+test('context delivery survives restart and commits only the successful input snapshot', async () => {
+  let finish!: (result: AgentResult) => void;
+  const calls: { context: AgentContext; prepared: ReturnType<typeof buildContext> }[] = [];
+  const f = fixture(c => {
+    calls.push({ context: c, prepared: buildContext(c.run, c.turn, c.participant) });
+    return new Promise(resolve => { finish = resolve; });
+  });
+  try {
+    const r = f.create(); await until(() => calls.length === 1);
+    // This message arrives after the running turn's snapshot: it must not be marked delivered.
+    f.engine.send(r.id, { kind: 'message', text: 'Новое ограничение' });
+    f.engine.control(r.id, 'pause');
+    finish({ reply: { message: 'Готово', actions: [] }, contextCheckpoint: calls[0].prepared.checkpoint });
+    await until(() => f.store.get(r.id).status === 'paused');
+    const firstCheckpoint = f.store.get(r.id).participants[0].contextCheckpoint!;
+    assert.deepEqual(firstCheckpoint.messageIds, [r.messages[0].id]);
+    f.engine.control(r.id, 'resume'); await until(() => calls.length === 2);
+    assert(JSON.parse(calls[1].prepared.prompt).requirementsAndCauses.some((m: { text: string }) => m.text === 'Новое ограничение'));
+    // The CLI succeeded, but invalid actions must not advance the durable checkpoint.
+    finish({ reply: { message: 'Некорректный ответ', actions: [{ type: 'send', to: 'missing-member', text: 'test' }] }, contextCheckpoint: calls[1].prepared.checkpoint });
+    await until(() => f.store.get(r.id).status === 'paused');
+    assert.deepEqual(f.store.get(r.id).participants[0].contextCheckpoint, firstCheckpoint);
+    const failed = f.store.get(r.id).turns.find(t => t.status === 'failed')!;
+    f.engine.resolveTurn(r.id, failed.id, 'retry', true); await until(() => calls.length === 3);
+    assert.deepEqual(calls[2].context.turn.causeIds, failed.causeIds);
+    assert(JSON.parse(calls[2].prepared.prompt).requirementsAndCauses.some((m: { text: string }) => m.text === 'Новое ограничение'));
+    finish({ reply: { message: 'Готово', actions: [] }, contextCheckpoint: calls[2].prepared.checkpoint });
+    await until(() => f.store.get(r.id).status === 'waiting');
+    const checkpoint = f.store.get(r.id).participants[0].contextCheckpoint;
+    assert.notDeepEqual(checkpoint, firstCheckpoint);
+    // A separate store reader exercises persisted JSON, not the adapter's in-memory copy.
+    const reopened = new Store(f.directory);
+    try { assert.deepEqual(reopened.get(r.id).participants[0].contextCheckpoint, checkpoint); }
+    finally { reopened.close(); }
+  } finally { await f.close(); }
+});
 
 test('retry can resume immediately or remain paused by user choice', async () => {
   for (const resume of [false, true]) {
