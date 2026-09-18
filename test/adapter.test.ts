@@ -8,30 +8,28 @@ import { Engine } from '../src/server/engine';
 import { gigacodeAdapter, cliArgs, type AgentContext } from '../src/server/agents/adapter';
 import { protocol } from '../src/server/agents/context';
 
-test('subagents are available in plan and editing turns but excluded during protocol repair', async () => {
+test('roles keep their edit mode, verification shell is allowed, and repair disables tools', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-subagents-'));
   const store = new Store(directory), engine = new Engine(store);
   try {
     const run = engine.create({ prompt: 'Изучить код', teamId: 'default-team', mode: 'demo' }); engine.control(run.id, 'pause');
     for (const access of ['discuss', 'execute'] as const) {
-      for (const readOnly of [false, true]) {
-        for (const protocolRepair of [false, true]) {
-          const c: AgentContext = { run, turn: { ...run.turns[0], readOnly },
+      for (const protocolRepair of [false, true]) {
+          const c: AgentContext = { run, turn: run.turns[0],
             participant: { ...run.participants[0], role: { ...run.participants[0].role, access } },
             protocolRepair, cli: { command: 'gigacode', timeoutSeconds: 10 },
             signal: new AbortController().signal, draft: () => {}, init: () => {}, activity: () => {} };
           const args = cliArgs(c), excluded = args.slice(args.indexOf('--exclude-tools') + 1, args.indexOf('--output-format'));
-          const editing = access === 'execute' && !readOnly && !protocolRepair;
+          const editing = access === 'execute' && !protocolRepair;
           const subagents = !protocolRepair;
-          assert.equal(excluded.includes('agent'), !subagents, JSON.stringify({ access, readOnly, protocolRepair }));
+          assert.equal(excluded.includes('agent'), !subagents, JSON.stringify({ access, protocolRepair }));
           assert(args.includes(`--approval-mode=${editing ? 'auto-edit' : 'plan'}`));
           assert.equal(excluded.includes('edit'), !editing); assert.equal(excluded.includes('write_file'), !editing);
-          assert(excluded.includes('exit_plan_mode')); assert.equal(args.includes('--allowed-tools'), editing);
+          assert(excluded.includes('exit_plan_mode')); assert.equal(args.includes('--allowed-tools'), !protocolRepair);
           assert(args[args.indexOf('--append-system-prompt') + 1].endsWith(!subagents
             ? 'В текущем ходе субагенты отключены.'
             : editing ? 'В текущем ходе разрешены субагенты для анализа и выполнения работы, включая правки файлов в рамках поручения.'
-              : 'В текущем ходе разрешены субагенты для чтения, поиска и анализа в режиме plan.'));
-        }
+              : 'В текущем ходе можно выполнять проверки, сборки и тесты через run_shell_command. Нельзя менять исходные файлы. Субагенты доступны для чтения, поиска, анализа и таких же проверок в режиме plan.'));
       }
     }
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -151,6 +149,35 @@ process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:
     assert.equal(result.usage?.total, 180); assert.equal(result.cumulativeUsage?.total, 180);
     assert(result.warnings?.some(warning => warning.includes('автоматически исправлен')));
     assert(activities.some(activity => activity.includes('Исправляет формат ответа (1/2)')));
+  } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('API response timeout is recovered in the same session without rerunning tools', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'teamytime-timeout-recovery-'));
+  const script = path.join(directory, 'gigacode');
+  writeFileSync(script, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const attempts = fs.existsSync('attempts.jsonl') ? fs.readFileSync('attempts.jsonl', 'utf8').trim().split('\\n').filter(Boolean).length : 0;
+fs.appendFileSync('attempts.jsonl', JSON.stringify(args) + '\\n');
+const id = args[args.indexOf(args.includes('--resume') ? '--resume' : '--session-id') + 1];
+const result = attempts === 0 ? '[API Error: Request timeout after 11s. Try again.]' : '@send marina\\nПроверка завершена\\n@end';
+process.stdout.write(JSON.stringify({type:'result',subtype:'success',session_id:id,result,usage:{input_tokens:(attempts+1)*100,output_tokens:(attempts+1)*10}}));
+`, { mode: 0o700 });
+  const store = new Store(directory), engine = new Engine(store);
+  try {
+    const run = engine.create({ prompt: 'Проверить восстановление', teamId: 'default-team', mode: 'demo', workspace: directory }); engine.control(run.id, 'pause');
+    const activities: string[] = [];
+    const c: AgentContext = { run, turn: run.turns[0], participant: run.participants[0], cli: { command: script, timeoutSeconds: 10 },
+      signal: new AbortController().signal, draft: () => {}, init: () => {}, activity: value => activities.push(value) };
+    const result = await gigacodeAdapter(c);
+    const attempts = readFileSync(path.join(directory, 'attempts.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
+    assert.equal(attempts.length, 2); assert(attempts[1].includes('--resume'));
+    assert(attempts[1].includes('--approval-mode=plan')); assert(!attempts[1].includes('--allowed-tools'));
+    assert.match(attempts[1][attempts[1].indexOf('-p') + 1], /восстанови только итоговый ответ целиком/);
+    assert.deepEqual(result.reply.actions, [{ type: 'send', to: 'marina', text: 'Проверка завершена' }]);
+    assert(result.warnings?.some(warning => warning.includes('восстановлен после таймаута')));
+    assert(activities.some(activity => activity.includes('Восстанавливает ответ после таймаута')));
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

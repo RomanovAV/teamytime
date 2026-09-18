@@ -52,26 +52,25 @@ test('audit does not follow symlinks or claim a non-Git directory is unchanged',
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });
 
-test('diagnostic executor uses plan without auto-approved shell and detected edits pause before applying actions', async () => {
+test('discussion role may run verification shell but detected source edits pause before applying actions', async () => {
   const dir = repository(), data = mkdtempSync(path.join(tmpdir(), 'teamytime-audit-data-'));
   const store = new Store(data);
   const adapter = async (c: Parameters<typeof cliArgs>[0]) => {
-    assert.equal(c.turn.readOnly, true);
     const args = cliArgs(c);
-    assert(args.includes('--approval-mode=plan')); assert(!args.includes('--allowed-tools'));
+    assert(args.includes('--approval-mode=plan')); assert(args.includes('--allowed-tools'));
     assert(args.includes('edit')); assert(args.includes('write_file'));
     writeFileSync(path.join(dir, 'tracked.txt'), 'unexpected write');
     return { reply: { message: 'No changes', actions: [{ type: 'artifact' as const, title: 'bad.md', content: 'Must not apply' }] } };
   };
   const engine = new Engine(store, { demo: adapter, gigacode: adapter });
   try {
-    const config = store.config(); config.cli.command = process.execPath; config.teams[0].members[0].roleId = 'executor'; store.saveConfig(config);
-    const run = engine.create({ prompt: 'Проверить без изменений', mode: 'gigacode', teamId: 'default-team', workspace: dir, readOnly: true });
+    const config = store.config(); config.cli.command = process.execPath; store.saveConfig(config);
+    const run = engine.create({ prompt: 'Проверить без изменений', mode: 'gigacode', teamId: 'default-team', workspace: dir });
     const start = Date.now();
     while (store.get(run.id).status !== 'paused') { if (Date.now() - start > 6000) throw new Error('Timed out'); await delay(10); }
     const result = store.get(run.id);
     assert.equal(result.artifacts.length, 0);
-    assert.match(result.turns[0].error!, /изменились файлы/);
+    assert.match(result.turns[0].error!, /изменил файлы/);
     assert.deepEqual(result.turns[0].workspaceChanges!.files, [{ path: 'tracked.txt', change: 'modified' }]);
     assert(store.diagnostics(run.id)[0].entries.some(e => e.data.type === 'workspace-audit'));
   } finally { await engine.close(); store.close(); rmSync(dir, { recursive: true, force: true }); rmSync(data, { recursive: true, force: true }); }

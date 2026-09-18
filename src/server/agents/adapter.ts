@@ -3,7 +3,7 @@ import { accessSync, constants } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { AgentReply, Configuration, ContextCheckpoint, Participant, Run, Turn, Usage } from '../../shared/types';
-import { ReplyError, StreamDecoder } from './protocol';
+import { ReplyError, ResponseTimeoutError, StreamDecoder } from './protocol';
 import { buildContext, buildPrompt, protocol } from './context';
 import type { TurnLogger } from '../diagnostics';
 import { CliErrors } from './cli-errors';
@@ -24,7 +24,7 @@ export function executable(command: string): string | undefined {
 }
 export function cliArgs(c: AgentContext): string[] {
   const p = c.participant;
-  const execute = p.role.access === 'execute' && !c.turn.readOnly && !c.protocolRepair;
+  const execute = p.role.access === 'execute' && !c.protocolRepair;
   // Delegation follows the participant's effective access. Format repair must not run work again.
   const excluded = ['save_memory', 'exit_plan_mode', 'ask_user_question',
     ...(c.protocolRepair ? ['agent'] : []),
@@ -36,9 +36,9 @@ export function cliArgs(c: AgentContext): string[] {
     '--append-system-prompt', `${p.role.instructions}\n${p.notes}\n${protocol}\n${c.protocolRepair
       ? 'В текущем ходе субагенты отключены.'
       : execute ? 'В текущем ходе разрешены субагенты для анализа и выполнения работы, включая правки файлов в рамках поручения.'
-        : 'В текущем ходе разрешены субагенты для чтения, поиска и анализа в режиме plan.'}`,
+        : 'В текущем ходе можно выполнять проверки, сборки и тесты через run_shell_command. Нельзя менять исходные файлы. Субагенты доступны для чтения, поиска, анализа и таких же проверок в режиме plan.'}`,
     `--approval-mode=${execute ? 'auto-edit' : 'plan'}`,
-    ...(execute ? ['--allowed-tools', 'run_shell_command'] : []),
+    ...(!c.protocolRepair ? ['--allowed-tools', 'run_shell_command'] : []),
     '--exclude-tools', ...excluded,
     '--output-format', 'stream-json', '--include-partial-messages',
     '-p', c.promptOverride ?? buildPrompt(c.run, c.turn, p),
@@ -46,6 +46,7 @@ export function cliArgs(c: AgentContext): string[] {
 }
 class ModelUnavailableError extends Error {}
 const protocolRepairAttempts = 2;
+const responseTimeoutAttempts = 2;
 
 function addUsage(a?: Usage, b?: Usage): Usage | undefined {
   if (!a) return b;
@@ -57,20 +58,48 @@ function repairPrompt(error: ReplyError, attempt: number): string {
   return `Предыдущий ответ отклонён Teamytime из-за формата:\n${error.message}\n\nИсправь предыдущий ответ и верни его целиком ещё раз. Сохрани содержание, адресатов, ID и все необходимые действия. Не повторяй исследование, команды, проверки и изменения файлов; инструменты в этом повторе отключены. Не объясняй ошибку и не добавляй служебный комментарий. Исправь только формат согласно системному протоколу. Это автоматическая попытка ${attempt} из ${protocolRepairAttempts}.`;
 }
 
+function timeoutRecoveryPrompt(attempt: number): string {
+  return `Предыдущая попытка завершилась таймаутом модели после того, как инструменты могли уже выполниться. Не повторяй исследование, команды, проверки и изменения файлов. По состоянию текущей сессии восстанови только итоговый ответ целиком, включая все необходимые адресные сообщения и другие действия протокола. Если результат предназначался коллеге, обязательно повтори соответствующий блок @send. Это автоматическая попытка восстановления ${attempt} из ${responseTimeoutAttempts}.`;
+}
+
 export const gigacodeAdapter: Adapter = async c => {
   await prepareArtifacts(c.run);
   const prepared = buildContext(c.run, c.turn, c.participant);
   const deadline = Date.now() + c.cli.timeoutSeconds * 1000;
-  let context = { ...c, promptOverride: c.promptOverride ?? prepared.prompt }, totalUsage: Usage | undefined, repairCount = 0;
+  let context = { ...c, promptOverride: c.promptOverride ?? prepared.prompt }, totalUsage: Usage | undefined, repairCount = 0, timeoutCount = 0;
   const carriedWarnings: string[] = [];
   while (true) {
     try {
       const result = await runWithModelFallback(context, deadline);
       totalUsage = addUsage(totalUsage, result.usage);
       const repaired = repairCount ? [`Ответ вне протокола автоматически исправлен с попытки ${repairCount + 1}; инструменты при исправлении были отключены.`] : [];
-      const warnings = [...new Set([...carriedWarnings, ...repaired, ...(result.warnings ?? [])])];
+      const recovered = timeoutCount ? [`Ответ восстановлен после таймаута с попытки ${timeoutCount}; инструменты повторно не запускались.`] : [];
+      const warnings = [...new Set([...carriedWarnings, ...repaired, ...recovered, ...(result.warnings ?? [])])];
       return { ...result, contextCheckpoint: c.promptOverride ? undefined : prepared.checkpoint, usage: totalUsage, warnings: warnings.length ? warnings : undefined };
     } catch (error) {
+      if (error instanceof ResponseTimeoutError) {
+        totalUsage = addUsage(totalUsage, error.usage);
+        carriedWarnings.push(...(error.warnings ?? []));
+        if (timeoutCount >= responseTimeoutAttempts || c.signal.aborted || Date.now() >= deadline) {
+          error.usage = totalUsage;
+          error.warnings = [...new Set([...carriedWarnings, `Автоматические попытки восстановления после таймаута (${responseTimeoutAttempts}) исчерпаны.`])];
+          throw error;
+        }
+        timeoutCount++;
+        c.activity(`Восстанавливает ответ после таймаута (${timeoutCount}/${responseTimeoutAttempts})`);
+        c.logger?.event({ type: 'response-timeout-retry', attempt: timeoutCount, maxAttempts: responseTimeoutAttempts });
+        context = {
+          ...c,
+          protocolRepair: true,
+          promptOverride: timeoutRecoveryPrompt(timeoutCount),
+          participant: {
+            ...c.participant,
+            sessionStarted: true,
+            cumulativeUsage: error.cumulativeUsage ?? context.participant.cumulativeUsage,
+          },
+        };
+        continue;
+      }
       if (!(error instanceof ReplyError)) throw error;
       totalUsage = addUsage(totalUsage, error.usage);
       carriedWarnings.push(...(error.warnings ?? []));
@@ -123,7 +152,12 @@ async function runGigacode(c: AgentContext, deadline: number): Promise<AgentResu
   const command = executable(c.cli.command);
   if (!command) throw new Error('GigaCode не найден. Укажите путь к исполняемому файлу в настройках команды.');
   const args = cliArgs(c);
-  c.logger?.event({ type: 'process-start', command, args, cwd: c.run.workspace });
+  c.logger?.event({
+    type: 'process-start', command, cwd: c.run.workspace,
+    session: c.participant.sessionStarted ? 'resume' : 'new', model: c.participant.model,
+    access: c.participant.role.access === 'execute' && !c.protocolRepair ? 'execute' : 'plan',
+    protocolRepair: !!c.protocolRepair,
+  });
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: c.run.workspace, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const decoder = new StreamDecoder(c.participant.sessionId, c.draft, c.init, c.activity);

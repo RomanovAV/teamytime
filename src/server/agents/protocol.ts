@@ -26,6 +26,21 @@ export class ReplyError extends Error {
   }
 }
 
+export class ResponseTimeoutError extends Error {
+  usage?: Usage;
+  cumulativeUsage?: Usage;
+  actualModel?: string;
+  warnings?: string[];
+  constructor(public raw: string) {
+    super('GigaCode не сформировал итоговый ответ из-за таймаута модели.');
+  }
+}
+
+function timeoutResponse(raw: string): boolean {
+  return /^\s*\[API Error:\s*.*\b(?:request\s+)?timeout\b/i.test(raw)
+    || /^\s*(?:request\s+)?timed?\s*out\b/i.test(raw);
+}
+
 // Old sessions may still answer in JSON during the transition.
 function legacyReply(raw: string): boolean {
   // A text action may contain JSON examples or a JSON artifact as its body.
@@ -136,6 +151,23 @@ export class StreamDecoder {
       delta = reset ? cumulative : Object.fromEntries(Object.keys(cumulative).map(k => [k, cumulative[k as keyof Usage] - previous[k as keyof Usage]])) as unknown as Usage;
     }
     const raw = typeof this.terminal.result === 'string' ? this.terminal.result : this.assistantText || this.partial;
+    if (timeoutResponse(raw)) {
+      // Some CLI versions emit a successful terminal event containing an API timeout.
+      // Prefer a complete assistant message already received before that marker.
+      for (const candidate of [this.assistantText, this.partial]) {
+        if (!candidate.trim() || timeoutResponse(candidate)) continue;
+        try {
+          return {
+            reply: parseReply(candidate),
+            warnings: [...(warnings ?? []), 'Итоговое событие CLI сообщило о таймауте, поэтому использован уже полученный полный ответ ассистента.'],
+            usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel,
+          };
+        } catch { /* Recovery can reconstruct an incomplete response without rerunning tools. */ }
+      }
+      const error = new ResponseTimeoutError(raw);
+      Object.assign(error, { usage: delta, cumulativeUsage: cumulative, actualModel: this.actualModel, warnings });
+      throw error;
+    }
     try {
       return { reply: parseReply(raw), warnings, usage: delta, cumulativeUsage: cumulative, initModel: this.initModel, actualModel: this.actualModel };
     } catch (error) {

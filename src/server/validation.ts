@@ -26,18 +26,16 @@ export const configurationSchema = z.object({
 export const createRunSchema = z.object({
   prompt: z.string().trim().min(3).max(12000), teamId: id,
   mode: z.enum(['demo', 'gigacode']), workspace: z.string().trim().max(1000).default(''),
-  readOnly: z.boolean().optional(),
 }).strict();
 export const messageSchema = z.object({
   text: z.string().trim().min(1).max(6000), kind: z.enum(['update', 'message']),
   recipientId: id.optional(),
-  readOnly: z.boolean().optional(),
 }).strict();
 export const replySchema = z.object({
   message: z.string().trim().min(1).max(24000),
   actions: z.array(z.discriminatedUnion('type', [
     z.object({ type: z.literal('continue'), reason: z.string().trim().min(1).max(2000) }).strict(),
-    z.object({ type: z.literal('send'), to: id, text: z.string().trim().min(1).max(24000), topicId: id.optional(), readOnly: z.boolean().optional() }).strict(),
+    z.object({ type: z.literal('send'), to: id, text: z.string().trim().min(1).max(24000), topicId: id.optional() }).strict(),
     z.object({ type: z.literal('open_topic'), title: short, ownerId: id }).strict(),
     z.object({ type: z.literal('resolve_topic'), topicId: id }).strict(),
     z.object({ type: z.literal('propose_decision'), title: short, rationale: z.string().trim().min(1).max(6000) }).strict(),

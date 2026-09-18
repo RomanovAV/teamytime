@@ -48,6 +48,7 @@ export function redact(value: unknown, workspace?: string): unknown {
 /** Frame before redacting so UTF-8 and credentials split across pipe chunks survive. */
 export class TurnLogger {
   error?: string;
+  private filtered = { streamEvents: 0, nestedEvents: 0, duplicateMessages: 0 };
   private channels = {
     stdout: { decoder: new StringDecoder('utf8'), buffer: '', dropping: false },
     stderr: { decoder: new StringDecoder('utf8'), buffer: '', dropping: false },
@@ -67,6 +68,10 @@ export class TurnLogger {
       if (channel.buffer && !channel.dropping) this.line(stream, channel.buffer);
       channel.buffer = ''; channel.dropping = false;
     }
+    if (Object.values(this.filtered).some(Boolean)) {
+      this.write('event', { type: 'output-filtered', ...this.filtered });
+      this.filtered = { streamEvents: 0, nestedEvents: 0, duplicateMessages: 0 };
+    }
   }
   private consume(stream: 'stdout' | 'stderr', text: string) {
     const channel = this.channels[stream];
@@ -85,9 +90,53 @@ export class TurnLogger {
   private line(stream: 'stdout' | 'stderr', line: string) {
     let data: unknown = line;
     if (stream === 'stdout') { try { data = JSON.parse(line); } catch { /* Preserve malformed output for diagnosis. */ } }
+    if (stream === 'stdout' && data && typeof data === 'object') {
+      const compact = this.compactStdout(data as Record<string, unknown>);
+      if (!compact) return;
+      data = compact;
+    }
     const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
-    // Full messages/tool results have their own budget; partial deltas cannot evict them.
+    // Tool evidence and terminal metadata have their own budget.
     const important = stream === 'stdout' && ['assistant', 'user', 'result', 'system'].includes(type ?? '');
     this.write(important ? 'evidence' : stream, redact(data, this.workspace));
+  }
+  private compactStdout(data: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (typeof data.parent_tool_use_id === 'string' && data.parent_tool_use_id) {
+      this.filtered.nestedEvents++;
+      return;
+    }
+    if (data.type === 'stream_event') {
+      this.filtered.streamEvents++;
+      return;
+    }
+    if (data.type === 'assistant' || data.type === 'user') {
+      const message = data.message && typeof data.message === 'object' ? data.message as Record<string, unknown> : {};
+      const content = Array.isArray(message.content) ? message.content.filter(item => {
+        if (!item || typeof item !== 'object') return false;
+        const type = (item as { type?: string }).type;
+        return data.type === 'assistant' ? type === 'tool_use' : type === 'tool_result';
+      }) : [];
+      if (!content.length) {
+        this.filtered.duplicateMessages++;
+        return;
+      }
+      return {
+        type: data.type,
+        ...(data.session_id === undefined ? {} : { session_id: data.session_id }),
+        message: { ...(message.model === undefined ? {} : { model: message.model }), content },
+      };
+    }
+    if (data.type === 'system' && data.subtype === 'init') {
+      return Object.fromEntries(['type', 'subtype', 'session_id', 'model'].flatMap(key => data[key] === undefined ? [] : [[key, data[key]]]));
+    }
+    if (data.type === 'result') {
+      const resultChars = typeof data.result === 'string' ? data.result.length
+        : data.result === undefined ? 0 : JSON.stringify(data.result).length;
+      return Object.fromEntries([
+        'type', 'subtype', 'session_id', 'is_error', 'duration_ms', 'duration_api_ms',
+        'num_turns', 'usage', 'total_cost_usd', 'permission_denials',
+      ].flatMap(key => data[key] === undefined ? [] : [[key, data[key]]]).concat([['resultChars', resultChars]]));
+    }
+    return data;
   }
 }

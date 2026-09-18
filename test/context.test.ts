@@ -49,7 +49,7 @@ test('resumed sessions receive only new relevant messages, with requirements and
       run.messages.push({ id, authorId: 'oleg', kind: 'agent', text: `Вывод ${id}`, recipientIds: [],
         deliveredTo: [], appliedBy: [], revision: 1, createdAt: 'now', ...fields });
     };
-    add('public'); add('addressed', { recipientIds: [member.id], readOnly: true });
+    add('public'); add('addressed', { recipientIds: [member.id] });
     add('other', { recipientIds: ['vera'] }); add('own', { authorId: member.id });
     add('stale', { stale: true }); add('old', { revision: 0 });
     const first = buildContext(run, turn, member);
@@ -65,7 +65,6 @@ test('resumed sessions receive only new relevant messages, with requirements and
     const second = context(buildPrompt(run, turn, member));
     assert.deepEqual(second.recentMessages.map((m: Message) => m.id), ['current']);
     assert.deepEqual(second.requirementsAndCauses.map((m: Message) => m.id), [run.messages[0].id, 'addressed', 'update']);
-    assert.equal(second.requirementsAndCauses[1].readOnly, true);
     run.revision = 1; turn.causeIds = [];
     assert.deepEqual(context(buildPrompt(run, turn, member)).recentMessages.map((m: Message) => m.id), ['new']);
     member.sessionId = 'replacement-session';

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { StreamDecoder, publicDraft, parseReply, ReplyError } from '../src/server/agents/protocol';
+import { ResponseTimeoutError, StreamDecoder, publicDraft, parseReply, ReplyError } from '../src/server/agents/protocol';
 
 test('streaming ignores thinking, UTF-8 boundaries and full-response duplication', () => {
   const drafts: string[] = [], init: string[] = [];
@@ -33,6 +33,19 @@ test('terminal result and schema validation are mandatory', () => {
   assert.throws(() => d.end(), /без итогового/);
   assert.throws(() => d.feed(Buffer.from('{"type":"system","session_id":"b"}\n')), /другую сессию/);
   assert.throws(() => parseReply('{"message":"ok","actions":[{"type":"shell","command":"oops"}]}'), /вне протокола/);
+});
+
+test('API timeout markers use an already completed assistant reply or request recovery', () => {
+  const completed = new StreamDecoder('a', () => {}, () => {}, () => {});
+  completed.feed(Buffer.from([
+    { type: 'assistant', session_id: 'a', message: { content: [{ type: 'text', text: '@send marina\nГотово\n@end' }] } },
+    { type: 'result', session_id: 'a', subtype: 'success', result: '[API Error: Request timeout after 11s.]' },
+  ].map(value => JSON.stringify(value)).join('\n')));
+  assert.deepEqual(completed.end().reply.actions, [{ type: 'send', to: 'marina', text: 'Готово' }]);
+
+  const missing = new StreamDecoder('a', () => {}, () => {}, () => {});
+  missing.feed(Buffer.from(JSON.stringify({ type: 'result', session_id: 'a', subtype: 'success', result: '[API Error: Request timeout after 11s.]' })));
+  assert.throws(() => missing.end(), error => error instanceof ResponseTimeoutError);
 });
 
 test('subagent events cannot replace the root session, draft, final reply or usage', () => {
@@ -139,8 +152,7 @@ test('run regressions: long review messages and artifact title on next line', ()
   assert.throws(() => parseReply(`@send marina\n${'x'.repeat(24001)}\n@end`), /actions.0.text: превышен лимит 24000/);
   assert.throws(() => parseReply('@artifact\n@end'), /параметры/);
   assert.throws(() => parseReply('@continue'), /Не закрыт/);
-  assert.deepEqual(parseReply('@send_readonly vera\nПроверь без правок\n@end').actions,
-    [{ type: 'send', to: 'vera', text: 'Проверь без правок', readOnly: true }]);
+  assert.throws(() => parseReply('@send_readonly vera\nПроверь без правок\n@end'), /Неизвестное действие/);
   assert.deepEqual(parseReply('@result\nФинальный отчёт.md\n# Готово\n@end').actions,
     [{ type: 'result', title: 'Финальный отчёт.md', content: '# Готово' }]);
   assert.deepEqual(parseReply('@publish_artifact artifact-1\n@end').actions,

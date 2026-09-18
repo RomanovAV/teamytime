@@ -122,8 +122,9 @@ export class Store {
     }));
   }
   runEvents(runId: string) {
-    const total = Number((this.db.prepare('SELECT COUNT(*) AS total FROM events WHERE run_id=?').get(runId) as { total: number }).total);
-    const items = (this.db.prepare('SELECT id,reason,created FROM events WHERE run_id=? ORDER BY id DESC LIMIT 5000').all(runId) as { id: number; reason: string; created: string }[])
+    const visible = "reason NOT IN ('draft','activity')";
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS total FROM events WHERE run_id=? AND ${visible}`).get(runId) as { total: number }).total);
+    const items = (this.db.prepare(`SELECT id,reason,created FROM events WHERE run_id=? AND ${visible} ORDER BY id DESC LIMIT 5000`).all(runId) as { id: number; reason: string; created: string }[])
       .reverse().map(e => ({ id: e.id, at: e.created, reason: e.reason }));
     return { items, droppedEntries: total - items.length };
   }

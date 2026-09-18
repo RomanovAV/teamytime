@@ -14,12 +14,13 @@ async function until(fn: () => boolean) {
   while (!fn()) { if (Date.now() - start > 6000) throw new Error('Timed out'); await delay(10); }
 }
 
-test('diagnostics redact complete fragmented UTF-8 lines, nested credentials, reasoning and deltas', () => {
+test('diagnostics redact fragmented data and compact duplicated model output', () => {
   const entries: { stream: string; data: unknown }[] = [];
   const logger = new TurnLogger((stream, data) => entries.push({ stream, data }), '/private/workspace');
   const stdout = [
     { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'PRIVATE_REASONING' }, { type: 'text', text: 'Привет' }, { type: 'tool_use', input: { api_key: 'KEY_SECRET', file: '/private/workspace/result.md' } }] } },
     { type: 'stream_event', event: { delta: { type: 'text_delta', text: 'SPLIT_SECRET' } } },
+    { type: 'assistant', parent_tool_use_id: 'subagent-1', message: { content: [{ type: 'text', text: 'NESTED_AGENT_OUTPUT' }] } },
     { type: 'result', result: '{"message":"Готово","password":"NESTED_SECRET"}' },
   ].map(e => JSON.stringify(e)).join('\n') + '\nnot stream-json: Привет';
   const buffer = Buffer.from(stdout);
@@ -30,12 +31,13 @@ test('diagnostics redact complete fragmented UTF-8 lines, nested credentials, re
   assert.equal(entries.filter(e => e.stream === 'stderr').length, 2, 'unfinished line is not persisted yet');
   logger.end();
   const serialized = JSON.stringify(entries);
-  for (const secret of ['PRIVATE_REASONING', 'KEY_SECRET', 'SPLIT_SECRET', 'NESTED_SECRET', 'BEARER_SECRET', 'AUTH_SECRET', 'ASSIGNMENT_SECRET', '/private/workspace']) assert(!serialized.includes(secret), secret);
+  for (const secret of ['PRIVATE_REASONING', 'KEY_SECRET', 'SPLIT_SECRET', 'NESTED_AGENT_OUTPUT', 'NESTED_SECRET', 'BEARER_SECRET', 'AUTH_SECRET', 'ASSIGNMENT_SECRET', '/private/workspace']) assert(!serialized.includes(secret), secret);
   assert(serialized.includes('Привет')); assert(!serialized.includes('�'));
   assert(serialized.includes('[WORKSPACE]/result.md'));
-  assert.equal(entries.filter(e => e.stream === 'stdout').length, 2);
+  assert.equal(entries.filter(e => e.stream === 'stdout').length, 1);
   assert.equal(entries.filter(e => e.stream === 'evidence').length, 2);
-  assert.equal(entries.at(-2)?.data, 'not stream-json: Привет');
+  assert(entries.some(e => e.data === 'not stream-json: Привет'));
+  assert.deepEqual(entries.at(-1)?.data, { type: 'output-filtered', streamEvents: 1, nestedEvents: 1, duplicateMessages: 0 });
   assert.deepEqual(redact({ input_tokens: 17, output_tokens: 2, token: 'secret' }), { input_tokens: 17, output_tokens: 2, token: '[REDACTED]' });
 });
 
@@ -45,7 +47,7 @@ test('oversized lines are omitted as a whole and logging failure does not crash 
   logger.feed('stdout', Buffer.from('x'.repeat(diagnosticLimits.lineBytes + 1)));
   logger.feed('stdout', Buffer.from('secret-tail\n{"type":"result","result":"OK"}\n'));
   logger.end();
-  assert.deepEqual(entries, [{ omitted: 'line_too_large', limitBytes: diagnosticLimits.lineBytes }, { type: 'result', result: 'OK' }]);
+  assert.deepEqual(entries, [{ omitted: 'line_too_large', limitBytes: diagnosticLimits.lineBytes }, { type: 'result', resultChars: 2 }]);
   let writes = 0;
   const broken = new TurnLogger(() => { writes++; throw new Error('disk full'); }, '/workspace');
   assert.doesNotThrow(() => { broken.feed('stderr', Buffer.from('first\nsecond\n')); broken.end(); });
@@ -78,7 +80,10 @@ test('bounded logs retain final failures and survive reopening without mixing ta
     assert(logged.entries.some(e => e.data.type === 'process-exit' && e.data.code === 7));
     assert.equal(logged.outcome.error, 'Final failure');
     assert.equal(store.get(first.id).status, 'interrupted');
-    const report = JSON.stringify(runReport(store, first.id));
+    store.update(first.id, 'draft', () => {}); store.update(first.id, 'activity', () => {});
+    const reportValue = runReport(store, first.id) as any;
+    assert(!reportValue.events.items.some((event: any) => ['draft', 'activity'].includes(event.reason)));
+    const report = JSON.stringify(reportValue);
     assert(!report.includes('PRIVATE_OTHER_TASK')); assert(report.includes('entry-549')); assert(!report.includes(first.workspace));
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -109,7 +114,7 @@ else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',sess
     engine.resolveTurn(broken.id, broken.turns[0].id, 'retry'); engine.control(broken.id, 'resume');
     await until(() => store.get(broken.id).status === 'paused');
     const attempts = store.diagnostics(broken.id); assert.equal(attempts.length, 2); assert.notEqual(attempts[0].turnId, attempts[1].turnId);
-    assert(attempts[1].entries.some(e => e.data.type === 'process-start' && e.data.args.includes('--resume')));
+    assert(attempts[1].entries.some(e => e.data.type === 'process-start' && e.data.session === 'resume'));
     const exited = create('exit'); await until(() => store.get(exited.id).status === 'paused');
     const exitLog = store.diagnostics(exited.id)[0];
     assert(exitLog.entries.some(e => e.stream === 'stderr' && e.data === 'network unavailable'));
@@ -117,7 +122,8 @@ else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',sess
     assert(!JSON.stringify(exitLog).includes('DO_NOT_EXPORT'));
     const badReply = create('reply'); await until(() => store.get(badReply.id).status === 'paused');
     const replyLog = store.diagnostics(badReply.id)[0];
-    assert(replyLog.entries.some(e => e.data.type === 'result' && e.data.result === '@send marina'));
+    assert(replyLog.entries.some(e => e.data.type === 'result' && e.data.resultChars === '@send marina'.length));
+    assert.equal(store.get(badReply.id).turns[0].rawReply, '@send marina');
     assert.match(replyLog.outcome.error, /вне протокола/);
     const timeoutConfig = store.config(); timeoutConfig.cli.timeoutSeconds = 1; store.saveConfig(timeoutConfig);
     const timedOut = create('hang'); await until(() => store.get(timedOut.id).status === 'paused');
@@ -133,7 +139,7 @@ else { process.stdout.write(JSON.stringify({type:'result',subtype:'success',sess
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('partial deltas never evict earlier tool evidence or a large final artifact', async () => {
+test('partial deltas and duplicate replies collapse while tool evidence remains', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'teamytime-evidence-'));
   const store = new Store(directory), engine = new Engine(store);
   try {
@@ -148,7 +154,8 @@ test('partial deltas never evict earlier tool evidence or a large final artifact
     const logs = store.diagnostics(run.id)[0];
     assert.equal(logs.entries.filter(e => e.stream === 'evidence').length, 3);
     assert(logs.entries.some(e => e.data.type === 'assistant'));
-    assert(logs.entries.some(e => e.data.type === 'result' && e.data.result.length === 50000));
-    assert(logs.droppedEntries > 0);
+    assert(logs.entries.some(e => e.data.type === 'result' && e.data.resultChars === 50000 && e.data.result === undefined));
+    assert(logs.entries.some(e => e.data.type === 'output-filtered' && e.data.streamEvents === 700));
+    assert.equal(logs.droppedEntries, 0);
   } finally { await engine.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

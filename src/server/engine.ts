@@ -11,10 +11,10 @@ import { snapshotWorkspace, compareWorkspace } from './workspace-audit';
 
 const now = () => new Date().toISOString();
 const uid = () => randomUUID();
-function queue(r: Run, agentId: string, causeId: string, reason: string, readOnly = false) {
-  const pending = r.turns.find(t => t.agentId === agentId && t.status === 'queued' && !!t.readOnly === readOnly);
+function queue(r: Run, agentId: string, causeId: string, reason: string) {
+  const pending = r.turns.find(t => t.agentId === agentId && t.status === 'queued');
   if (pending) { if (!pending.causeIds.includes(causeId)) pending.causeIds.push(causeId); return; }
-  r.turns.push({ id: uid(), agentId, causeIds: [causeId], status: 'queued', reason, createdAt: now(), draft: '', readOnly });
+  r.turns.push({ id: uid(), agentId, causeIds: [causeId], status: 'queued', reason, createdAt: now(), draft: '' });
 }
 function message(r: Run, fields: Pick<Message, 'authorId' | 'kind' | 'text' | 'recipientIds'> & Partial<Message>): Message {
   const m: Message = { id: uid(), deliveredTo: [], appliedBy: [], revision: r.revision, createdAt: now(), ...fields };
@@ -22,7 +22,7 @@ function message(r: Run, fields: Pick<Message, 'authorId' | 'kind' | 'text' | 'r
 }
 
 export class Engine {
-  private active = new Map<string, { runId: string; agentId: string; workspace: string; write: boolean; readOnly: boolean; abort: AbortController; done: Promise<void> }>();
+  private active = new Map<string, { runId: string; agentId: string; workspace: string; write: boolean; abort: AbortController; done: Promise<void> }>();
   private scheduled = false;
   private closing = false;
   constructor(readonly store: Store, private adapters: Record<Run['mode'], Adapter> = { demo: demoAdapter, gigacode: gigacodeAdapter }) {}
@@ -46,8 +46,8 @@ export class Engine {
       participants: team.members.map(m => ({ ...m, role: structuredClone(config.roles.find(role => role.id === m.roleId)!), sessionId: uid(), sessionStarted: false })),
       messages: [], turns: [], topics: [], decisions: [], artifacts: [], turnBatchSize: team.maxTurns,
     };
-    const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId], readOnly: data.readOnly });
-    queue(run, team.leadId, m.id, 'Новая задача', data.readOnly); this.store.create(run); this.kick(); return run;
+    const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId] });
+    queue(run, team.leadId, m.id, 'Новая задача'); this.store.create(run); this.kick(); return run;
   }
   send(id: string, input: unknown) {
     const data = messageSchema.parse(input);
@@ -59,9 +59,8 @@ export class Engine {
         r.revision++; r.completion = undefined; r.finalSummary = undefined;
         r.decisions.filter(d => d.status !== 'rejected').forEach(d => d.status = 'needs_review');
       }
-      const readOnly = data.readOnly ?? !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly;
-      const m = message(r, { authorId: null, kind: 'user', text: data.text, recipientIds: recipients, readOnly });
-      recipients.forEach(to => queue(r, to, m.id, data.kind === 'update' ? 'Уточнение требований' : 'Сообщение пользователя', readOnly));
+      const m = message(r, { authorId: null, kind: 'user', text: data.text, recipientIds: recipients });
+      recipients.forEach(to => queue(r, to, m.id, data.kind === 'update' ? 'Уточнение требований' : 'Сообщение пользователя'));
       r.completion = undefined; r.finalSummary = undefined;
       if (['waiting', 'completed'].includes(r.status)) { r.status = 'running'; r.note = ''; }
     });
@@ -87,13 +86,11 @@ export class Engine {
           r.turnBatchSize = batch;
           r.team.maxTurns += batch;
           // An exhausted task may have finished its last turn without scheduling a successor.
-          // Give its lead a continuation, keeping the same revision, session and access scope.
+          // Give its lead a continuation, keeping the same revision and session.
           if (!r.turns.some(t => t.status === 'queued')) {
-            const leadTurn = r.turns.filter(t => t.agentId === r.team.leadId).at(-1);
-            const readOnly = !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly || !!leadTurn?.readOnly;
-            const m = message(r, { authorId: null, kind: 'system', recipientIds: [r.team.leadId], readOnly,
+            const m = message(r, { authorId: null, kind: 'system', recipientIds: [r.team.leadId],
               text: 'Пользователь продолжил задачу после исчерпания лимита ходов. Продолжи незавершённую работу с учётом сохранённых результатов и текущих требований. Сосредоточься на оставшейся работе, проверке и финальном результате; не повторяй выполненное.' });
-            queue(r, r.team.leadId, m.id, 'Продолжение после увеличения лимита', readOnly);
+            queue(r, r.team.leadId, m.id, 'Продолжение после увеличения лимита');
           }
         }
         r.status = 'running'; r.note = '';
@@ -110,7 +107,7 @@ export class Engine {
       const t = r.turns.find(t => t.id === turnId);
       if (!t || !['failed', 'interrupted'].includes(t.status)) throw new UserError('Этот ход не требует восстановления.');
       t.status = 'skipped';
-      if (action === 'retry') for (const cause of t.causeIds) queue(r, t.agentId, cause, 'Повтор по запросу пользователя', t.readOnly);
+      if (action === 'retry') for (const cause of t.causeIds) queue(r, t.agentId, cause, 'Повтор по запросу пользователя');
       if (resume !== undefined) r.resumeAfterRecovery = resume;
       if (r.resumeAfterRecovery && !r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) {
         r.resumeAfterRecovery = false;
@@ -151,9 +148,8 @@ export class Engine {
       if (r.status === 'cancelled') throw new UserError('Задача остановлена.');
       const d = r.decisions.find(d => d.id === decisionId); if (!d) throw new UserError('Решение не найдено.');
       d.status = action === 'accept' ? 'accepted' : 'rejected'; d.revision = r.revision;
-      const readOnly = !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly;
-      const m = message(r, { authorId: null, kind: 'user', text: `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».`, recipientIds: [r.team.leadId], readOnly });
-      queue(r, r.team.leadId, m.id, 'Решение пользователя', readOnly);
+      const m = message(r, { authorId: null, kind: 'user', text: `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».`, recipientIds: [r.team.leadId] });
+      queue(r, r.team.leadId, m.id, 'Решение пользователя');
       r.completion = undefined;
       if (['completed', 'waiting'].includes(r.status)) r.status = 'running';
     }); this.kick(); return value;
@@ -177,8 +173,10 @@ export class Engine {
         }
         const p = r.participants.find(p => p.id === t.agentId)!;
         if (active.some(a => a.runId === r.id && a.agentId === p.id)) continue;
-        const writing = p.role.access === 'execute' && !t.readOnly;
-        if (active.some(a => a.workspace === r.workspace && ((writing && (a.write || a.readOnly)) || (t.readOnly && a.write)))) continue;
+        const writing = p.role.access === 'execute';
+        // A writer gets exclusive access to the workspace. Readers may run together,
+        // but never while an executor is changing the tree they are reviewing.
+        if (active.some(a => a.workspace === r.workspace && (writing || a.write))) continue;
         this.start(r.id, t.id); started++;
       }
       const fresh = this.store.get(r.id);
@@ -198,7 +196,7 @@ export class Engine {
     });
     const turn = snapshot.turns.find(t => t.id === turnId)!, participant = snapshot.participants.find(p => p.id === turn.agentId)!;
     const abort = new AbortController();
-    const entry = { runId, agentId: participant.id, workspace: snapshot.workspace, write: participant.role.access === 'execute' && !turn.readOnly, readOnly: !!turn.readOnly, abort, done: Promise.resolve() };
+    const entry = { runId, agentId: participant.id, workspace: snapshot.workspace, write: participant.role.access === 'execute', abort, done: Promise.resolve() };
     this.active.set(turnId, entry);
     let lastUpdate = 0;
     const update = (reason: string, fn: (r: Run, t: Turn) => void) => this.store.update(runId, reason, r => { const t = r.turns.find(t => t.id === turnId)!; if (t.status === 'running') fn(r, t); });
@@ -218,10 +216,20 @@ export class Engine {
           const changes = compareWorkspace(before, await snapshotWorkspace(snapshot.workspace));
           update('workspace-audit', (_r, t) => { t.workspaceChanges = changes; });
           logger.event({ type: 'workspace-audit', ...changes });
-          if (turn.readOnly && changes.files.length) throw new Error('Во время хода «без изменений» изменились файлы. Действия ответа не применены. Проверьте изменения в отчёте; автоматического отката нет.');
+          if (participant.role.access === 'discuss' && changes.files.length) throw new Error('Участник с доступом «обсуждение» изменил файлы. Действия ответа не применены. Проверьте изменения в отчёте; автоматического отката нет.');
         }
       }
-    }).then(result => { replyText = result.reply.message; logger?.event({ type: 'adapter-result', ...result }); this.succeed(runId, turnId, result); }).catch(error => {
+    }).then(result => {
+      replyText = result.reply.message;
+      logger?.event({
+        type: 'adapter-result', messageChars: result.reply.message.length,
+        actionTypes: result.reply.actions.map(action => action.type), warnings: result.warnings,
+        usage: result.usage, cumulativeUsage: result.cumulativeUsage,
+        initModel: result.initModel, actualModel: result.actualModel,
+        checkpointMessages: result.contextCheckpoint?.messageIds.length,
+      });
+      this.succeed(runId, turnId, result);
+    }).catch(error => {
       this.store.update(runId, 'turn-error', r => {
         const t = r.turns.find(t => t.id === turnId)!;
         if (replyText) t.draft = replyText;
@@ -286,11 +294,11 @@ export class Engine {
     switch (a.type) {
       case 'continue': {
         const m = message(r, { authorId: t.agentId, kind: 'system', text: `Продолжение работы: ${a.reason}`, recipientIds: [t.agentId], turnId: t.id });
-        queue(r, t.agentId, m.id, 'Продолжение работы участника', t.readOnly); break;
+        queue(r, t.agentId, m.id, 'Продолжение работы участника'); break;
       }
       case 'send': {
-        const m = message(r, { authorId: t.agentId, kind: 'agent', text: a.text, recipientIds: [a.to], turnId: t.id, topicId: a.topicId, readOnly: !!t.readOnly || !!a.readOnly });
-        queue(r, a.to, m.id, 'Сообщение коллеги', !!t.readOnly || !!a.readOnly); break;
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `${a.text}${this.turnEvidence(t)}`, recipientIds: [a.to], turnId: t.id, topicId: a.topicId });
+        queue(r, a.to, m.id, 'Сообщение коллеги'); break;
       }
       case 'open_topic': r.topics.push({ id: uid(), title: a.title, ownerId: a.ownerId, status: 'open', createdAt: now() }); break;
       case 'resolve_topic': r.topics.find(t => t.id === a.topicId)!.status = 'resolved'; break;
@@ -303,6 +311,18 @@ export class Engine {
       case 'publish_artifact': r.artifacts.find(artifact => artifact.id === a.artifactId)!.kind = 'result'; break;
       case 'finish': r.completion = { summary: a.summary, evidenceIds: a.evidenceIds, revision: r.revision }; break;
     }
+  }
+  private turnEvidence(turn: Turn): string {
+    const audit = turn.workspaceChanges;
+    let files = 'проверка рабочего каталога не выполнялась';
+    if (audit) {
+      const shown = audit.files.slice(0, 20).map(file => `${file.change}: ${file.path}`);
+      files = shown.length ? shown.join(', ') : 'изменений файлов за ход не обнаружено';
+      if (audit.files.length > shown.length) files += `, ещё ${audit.files.length - shown.length}`;
+      if (audit.incomplete) files += '; проверка неполная';
+    }
+    const warnings = turn.warnings?.length ? `\nПредупреждения: ${turn.warnings.join(' ')}` : '';
+    return `\n\n[Автоматические данные Teamytime]\n${files}.${warnings}`;
   }
   async close() { this.closing = true; for (const a of this.active.values()) a.abort.abort(); await Promise.allSettled([...this.active.values()].map(a => a.done)); }
 }
