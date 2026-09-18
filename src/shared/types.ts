@@ -51,6 +51,7 @@ export interface Run {
   team: Team; participants: Participant[]; messages: Message[]; turns: Turn[];
   topics: Topic[]; decisions: Decision[]; artifacts: Artifact[];
   resumeAfterRecovery?: boolean;
+  turnBatchSize?: number;
   completion?: Completion; finalSummary?: string;
 }
 export interface RunSummary {

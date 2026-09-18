@@ -44,7 +44,7 @@ export class Engine {
       id, title: data.prompt.replace(/\s+/g, ' ').slice(0, 80), prompt: data.prompt, mode: data.mode, status: 'running', note: '', revision: 1,
       createdAt: now(), updatedAt: now(), workspace, team: structuredClone(team),
       participants: team.members.map(m => ({ ...m, role: structuredClone(config.roles.find(role => role.id === m.roleId)!), sessionId: uid(), sessionStarted: false })),
-      messages: [], turns: [], topics: [], decisions: [], artifacts: [],
+      messages: [], turns: [], topics: [], decisions: [], artifacts: [], turnBatchSize: team.maxTurns,
     };
     const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId], readOnly: data.readOnly });
     queue(run, team.leadId, m.id, 'Новая задача', data.readOnly); this.store.create(run); this.kick(); return run;
@@ -69,6 +69,8 @@ export class Engine {
   }
   control(id: string, action: string) {
     if (!['pause', 'resume', 'cancel'].includes(action)) throw new UserError('Неизвестное действие.');
+    const current = this.store.get(id);
+    const configuredBatch = this.store.config().teams.find(team => team.id === current.team.id)?.maxTurns;
     const value = this.store.update(id, action, r => {
       r.resumeAfterRecovery = false;
       if (action === 'cancel') {
@@ -79,7 +81,21 @@ export class Engine {
       if (action === 'pause') { r.status = this.isActive(id) ? 'pausing' : 'paused'; r.note = 'Пауза по запросу пользователя.'; }
       else {
         if (r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) throw new UserError('Сначала повторите или пропустите незавершённые ходы.');
-        if (r.turns.filter(t => t.startedAt).length >= r.team.maxTurns) throw new UserError('Лимит ходов исчерпан. Создайте новую задачу с большим лимитом.');
+        const exhausted = r.turns.filter(t => t.startedAt).length >= r.team.maxTurns;
+        if (exhausted) {
+          const batch = configuredBatch ?? r.turnBatchSize ?? r.team.maxTurns;
+          r.turnBatchSize = batch;
+          r.team.maxTurns += batch;
+          // An exhausted task may have finished its last turn without scheduling a successor.
+          // Give its lead a continuation, keeping the same revision, session and access scope.
+          if (!r.turns.some(t => t.status === 'queued')) {
+            const leadTurn = r.turns.filter(t => t.agentId === r.team.leadId).at(-1);
+            const readOnly = !!r.messages.filter(m => m.kind === 'user').at(-1)?.readOnly || !!leadTurn?.readOnly;
+            const m = message(r, { authorId: null, kind: 'system', recipientIds: [r.team.leadId], readOnly,
+              text: 'Пользователь продолжил задачу после исчерпания лимита ходов. Продолжи незавершённую работу с учётом сохранённых результатов и текущих требований. Сосредоточься на оставшейся работе, проверке и финальном результате; не повторяй выполненное.' });
+            queue(r, r.team.leadId, m.id, 'Продолжение после увеличения лимита', readOnly);
+          }
+        }
         r.status = 'running'; r.note = '';
       }
     });
@@ -99,7 +115,7 @@ export class Engine {
       if (r.resumeAfterRecovery && !r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) {
         r.resumeAfterRecovery = false;
         if (r.turns.filter(t => t.startedAt).length >= r.team.maxTurns) {
-          r.note = `Достигнут лимит ${r.team.maxTurns} ходов. Создайте новую задачу с большим лимитом.`;
+          r.note = `Достигнут лимит ${r.team.maxTurns} ходов. Нажмите «Продолжить», чтобы добавить лимит из настроек команды.`;
         } else { r.status = 'running'; r.note = ''; }
       } else r.note = r.resumeAfterRecovery
         ? 'Работа продолжится после повтора или пропуска оставшихся ошибочных ходов.'
@@ -157,7 +173,7 @@ export class Engine {
         const active = [...this.active.values()];
         if (active.length >= 4 || active.filter(a => a.runId === r.id).length >= r.team.parallelism) break;
         if (started >= r.team.maxTurns) {
-          this.store.update(r.id, 'budget', r => { r.status = this.isActive(r.id) ? 'pausing' : 'paused'; r.note = `Достигнут лимит ${r.team.maxTurns} ходов.`; }); break;
+          this.store.update(r.id, 'budget', r => { r.status = this.isActive(r.id) ? 'pausing' : 'paused'; r.note = `Достигнут лимит ${r.team.maxTurns} ходов. Нажмите «Продолжить», чтобы добавить лимит из настроек команды.`; }); break;
         }
         const p = r.participants.find(p => p.id === t.agentId)!;
         if (active.some(a => a.runId === r.id && a.agentId === p.id)) continue;

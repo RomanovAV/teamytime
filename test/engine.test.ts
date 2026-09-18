@@ -195,13 +195,36 @@ test('manual checkpoint retains queued work until the user continues', async () 
   } finally { await f.close(); }
 });
 
-test('global turn budget stops self-sustaining message loops', async () => {
+test('continue replenishes an exhausted task from current team settings', async () => {
   const f = fixture(async c => ({ reply: { message: 'Передаю ход', actions: [{ type: 'send', to: c.participant.id === 'marina' ? 'alex' : 'marina', text: 'Ещё один ход' }] } }));
   try {
     const config = f.store.config(); config.teams[0].maxTurns = 4; f.store.saveConfig(config);
     const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+    const sessions = f.store.get(r.id).participants.map(p => p.sessionId);
     assert.equal(f.store.get(r.id).turns.filter(t => t.startedAt).length, 4);
-    assert.throws(() => f.engine.control(r.id, 'resume'), /Лимит ходов/);
+    const changed = f.store.config(); changed.teams[0].maxTurns = 7; f.store.saveConfig(changed);
+    f.engine.control(r.id, 'resume');
+    assert.equal(f.store.get(r.id).team.maxTurns, 11);
+    await until(() => f.store.get(r.id).status === 'paused');
+    const extended = f.store.get(r.id);
+    assert.equal(extended.turns.filter(t => t.startedAt).length, 11);
+    assert.deepEqual(extended.participants.map(p => p.sessionId), sessions);
+  } finally { await f.close(); }
+});
+
+test('continue after an exhausted final turn queues the lead when no work remains queued', async () => {
+  let calls = 0;
+  const f = fixture(async () => ({ reply: { message: `Ход ${++calls}`, actions: [] } }));
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'waiting');
+    f.store.update(r.id, 'fixture', run => { run.team.maxTurns = 1; });
+    const config = f.store.config(); config.teams[0].maxTurns = 6; f.store.saveConfig(config);
+    f.engine.control(r.id, 'resume');
+    await until(() => calls === 2 && f.store.get(r.id).status === 'waiting');
+    const state = f.store.get(r.id);
+    assert.equal(state.team.maxTurns, 7);
+    assert(state.messages.some(m => m.kind === 'system' && m.text.includes('исчерпания лимита ходов')));
+    assert.equal(state.turns.at(-1)?.agentId, state.team.leadId);
   } finally { await f.close(); }
 });
 
