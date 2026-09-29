@@ -195,6 +195,43 @@ test('manual checkpoint retains queued work until the user continues', async () 
   } finally { await f.close(); }
 });
 
+test('automatic checkpoints accept lead decisions and do not block completion', async () => {
+  const f = fixture(async c => {
+    if (c.participant.id === 'marina' && !c.run.decisions.length) {
+      return { reply: { message: 'Выбрала рабочий вариант', actions: [
+        { type: 'propose_decision', title: 'Рабочий вариант', rationale: 'Достаточно для выполнения задачи' },
+        { type: 'send', to: 'oleg', text: 'Проверь результат' },
+      ] } };
+    }
+    if (c.participant.id === 'oleg') {
+      return { reply: { message: 'Проверка завершена', actions: [{ type: 'send', to: 'marina', text: 'Результат проверен' }] } };
+    }
+    const evidence = c.run.messages.find(m => m.authorId === 'oleg' && m.recipientIds.includes('marina'))!;
+    return { reply: { message: 'Задача завершена', actions: [{ type: 'finish', summary: 'Готово', evidenceIds: [evidence.id] }] } };
+  });
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'completed');
+    const done = f.store.get(r.id);
+    assert.equal(done.decisions[0].status, 'accepted');
+    assert.equal(done.finalSummary, 'Готово');
+  } finally { await f.close(); }
+});
+
+test('automatic checkpoints release existing lead proposals when a run resumes', async () => {
+  const f = fixture(async () => ({ reply: { message: 'Готово', actions: [] } }));
+  try {
+    const r = f.create(); await until(() => f.store.get(r.id).status === 'waiting');
+    f.store.update(r.id, 'legacy-decision', run => {
+      run.decisions.push({ id: 'old-proposal', title: 'Рабочее решение', rationale: 'Принято ведущим',
+        authorId: run.team.leadId, status: 'proposed', revision: run.revision, createdAt: new Date().toISOString() });
+      run.completion = { summary: 'Готово', evidenceIds: [], revision: run.revision };
+    });
+    f.engine.control(r.id, 'resume');
+    await until(() => f.store.get(r.id).status === 'completed');
+    assert.equal(f.store.get(r.id).decisions[0].status, 'accepted');
+  } finally { await f.close(); }
+});
+
 test('continue replenishes an exhausted task from current team settings', async () => {
   const f = fixture(async c => ({ reply: { message: 'Передаю ход', actions: [{ type: 'send', to: c.participant.id === 'marina' ? 'alex' : 'marina', text: 'Ещё один ход' }] } }));
   try {

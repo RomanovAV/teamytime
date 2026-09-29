@@ -12,6 +12,7 @@ function action(header: string, lines: string[]): Action {
   };
   const emptyBody = () => { if (body) throw new Error(`Блок @${name} не принимает текст.`); };
   switch (name) {
+    case 'memory': requireArgs(0); return { type: 'memory', content: body };
     case 'send': requireArgs(1, 2); return { type: 'send', to: args[0], text: body, ...(args[1] ? { topicId: args[1] } : {}) };
     case 'continue': requireArgs(0); return { type: 'continue', reason: body };
     case 'open_topic': requireArgs(1); return { type: 'open_topic', ownerId: args[0], title: body };

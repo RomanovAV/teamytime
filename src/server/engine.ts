@@ -182,7 +182,16 @@ export class Engine {
       const fresh = this.store.get(r.id);
       if (fresh.status === 'running' && !this.isActive(r.id) && !fresh.turns.some(t => t.status === 'queued')) {
         this.store.update(r.id, 'idle', r => {
-          const unresolved = r.decisions.some(d => ['proposed', 'needs_review'].includes(d.status)) || r.topics.some(t => t.status === 'open');
+          if (r.team.checkpoints === 'auto') {
+            // Older runs may contain lead decisions proposed before automatic
+            // checkpoints accepted them. Bring those runs under the same rule.
+            for (const d of r.decisions) {
+              if (d.status === 'proposed' && d.authorId === r.team.leadId && d.revision === r.revision) d.status = 'accepted';
+            }
+          }
+          const unresolvedDecisions = r.team.checkpoints === 'manual'
+            && r.decisions.some(d => ['proposed', 'needs_review'].includes(d.status));
+          const unresolved = unresolvedDecisions || r.topics.some(t => t.status === 'open');
           if (r.completion?.revision === r.revision && !unresolved) { r.status = 'completed'; r.finalSummary = r.completion.summary; r.note = ''; }
           else { r.status = 'waiting'; r.note = unresolved ? 'Остались открытые темы или решения. Напишите ведущему или примите решение.' : 'В очереди нет поручений. Можно написать участнику или уточнить задачу.'; }
         });
@@ -303,7 +312,9 @@ export class Engine {
       case 'open_topic': r.topics.push({ id: uid(), title: a.title, ownerId: a.ownerId, status: 'open', createdAt: now() }); break;
       case 'resolve_topic': r.topics.find(t => t.id === a.topicId)!.status = 'resolved'; break;
       case 'propose_decision':
-        r.decisions.push({ id: uid(), title: a.title, rationale: a.rationale, authorId: t.agentId, status: 'proposed', revision: r.revision, createdAt: now() });
+        r.decisions.push({ id: uid(), title: a.title, rationale: a.rationale, authorId: t.agentId,
+          status: r.team.checkpoints === 'auto' && t.agentId === r.team.leadId ? 'accepted' : 'proposed',
+          revision: r.revision, createdAt: now() });
         if (r.team.checkpoints === 'manual') { r.resumeAfterRecovery = false; r.status = 'pausing'; r.note = 'Команда предложила решение. Проверьте его и продолжите работу.'; } break;
       case 'accept_decision': r.decisions.find(d => d.id === a.decisionId)!.status = 'accepted'; break;
       case 'artifact': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now(), kind: 'working' }); break;

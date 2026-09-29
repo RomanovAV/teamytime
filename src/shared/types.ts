@@ -14,11 +14,15 @@ export interface Configuration {
 export type RunStatus = 'running' | 'pausing' | 'paused' | 'waiting' | 'completed' | 'cancelled' | 'interrupted';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted' | 'cancelled' | 'skipped';
 export interface Usage { input: number; output: number; cachedInput: number; total: number }
-export interface ContextCheckpoint { sessionId: string; messageIds: string[] }
+export interface ContextCheckpoint { sessionId: string; messageIds: string[]; stateHashes?: Record<string, string> }
 export interface Participant extends Member {
   role: Role; sessionId: string; sessionStarted: boolean;
   initModel?: string; actualModel?: string; cumulativeUsage?: Usage;
   contextCheckpoint?: ContextCheckpoint;
+  sessionTurns?: number;
+  sessionPromptBytes?: number;
+  previousSessionIds?: string[];
+  memory?: { content: string; turnId: string; revision: number };
 }
 export interface Message {
   id: string; authorId: string | null; kind: 'user' | 'agent' | 'system'; text: string;
@@ -29,6 +33,7 @@ export interface Turn {
   id: string; agentId: string; causeIds: string[]; status: TurnStatus; reason: string;
   createdAt: string; startedAt?: string; finishedAt?: string; revision?: number;
   warnings?: string[];
+  contextMetrics?: { sessionId: string; promptBytes: number; systemPromptBytes: number; attempts: number };
   rawReply?: string;
   workspaceChanges?: { files: { path: string; change: 'added' | 'modified' | 'deleted' }[]; incomplete: boolean; note?: string };
   draft: string; activity?: string; error?: string; stale?: boolean; usage?: Usage;
@@ -57,6 +62,7 @@ export interface RunSummary {
   updatedAt: string; teamName: string; messageCount: number;
 }
 export type Action =
+  | { type: 'memory'; content: string }
   | { type: 'continue'; reason: string }
   | { type: 'send'; to: string; text: string; topicId?: string }
   | { type: 'open_topic'; title: string; ownerId: string }
