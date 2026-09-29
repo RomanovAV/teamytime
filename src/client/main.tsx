@@ -18,7 +18,7 @@ function App() {
   const [selected, setSelected] = useState(location.hash.slice(1));
   const [run, setRun] = useState<Run>();
   const [settings, setSettings] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'decisions' | 'materials' | 'result'>('chat');
+  const [tab, setTab] = useState<'chat' | 'work' | 'decisions' | 'materials' | 'result'>('chat');
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -71,8 +71,8 @@ function App() {
         {run.note && <div className="run-note">{run.note}</div>}
         <div className="run-report"><a className="secondary" href={`/api/runs/${run.id}/report`} download>Скачать отчёт ↓</a><span>Один файл с диалогом, результатами и логами для разбора запуска.</span></div>
         <div className="run-layout"><div className="conversation">
-          <div className="tabs"><button className={tab === 'chat' ? 'chosen' : ''} onClick={() => setTab('chat')}>Диалог <span>{run.messages.length}</span></button><button className={tab === 'decisions' ? 'chosen' : ''} onClick={() => setTab('decisions')}>Решения <span>{run.decisions.length}</span></button><button className={tab === 'materials' ? 'chosen' : ''} onClick={() => setTab('materials')}>Материалы <span>{run.artifacts.length}</span></button><button className={tab === 'result' ? 'chosen' : ''} onClick={() => setTab('result')}>Результат <span>{resultCount(run)}</span></button></div>
-          {tab === 'chat' ? <Chat key={run.id} run={run} busy={busy} act={act}/> : tab === 'decisions' ? <Decisions run={run} busy={busy} act={act}/> : tab === 'materials' ? <Materials run={run}/> : <Result run={run}/>}
+          <div className="tabs"><button className={tab === 'chat' ? 'chosen' : ''} onClick={() => setTab('chat')}>Диалог <span>{run.messages.length}</span></button><button className={tab === 'work' ? 'chosen' : ''} onClick={() => setTab('work')}>Работа <span>{(run.workItems ?? []).filter(item => item.revision === run.revision).length}</span></button><button className={tab === 'decisions' ? 'chosen' : ''} onClick={() => setTab('decisions')}>Решения <span>{run.decisions.length}</span></button><button className={tab === 'materials' ? 'chosen' : ''} onClick={() => setTab('materials')}>Материалы <span>{run.artifacts.length}</span></button><button className={tab === 'result' ? 'chosen' : ''} onClick={() => setTab('result')}>Результат <span>{resultCount(run)}</span></button></div>
+          {tab === 'chat' ? <Chat key={run.id} run={run} busy={busy} act={act}/> : tab === 'work' ? <Work run={run}/> : tab === 'decisions' ? <Decisions run={run} busy={busy} act={act}/> : tab === 'materials' ? <Materials run={run}/> : <Result run={run}/>}
         </div><TeamPanel run={run}/></div>
       </>}
     </main>
@@ -83,6 +83,11 @@ function Empty({ title, text }: { title: string; text: string }) { return <div c
 function ArtifactCard({ run, artifact }: { run: Run; artifact: Run['artifacts'][number] }) {
   const kind = artifact.kind === 'result' ? run.status === 'completed' && artifact.revision === run.revision ? 'финальный результат' : 'кандидат в результат' : 'рабочий материал';
   return <article className="artifact-card"><div className="artifact-header"><div><span className="file-icon">▧</span><h3>{artifact.title}</h3></div><a className="secondary" href={`/api/runs/${run.id}/artifacts/${artifact.id}`}>Скачать ↓</a></div><div className="card-kicker">{run.participants.find(p => p.id === artifact.authorId)?.name} · {kind} · версия {artifact.revision}{artifact.revision !== run.revision ? ' · прежние требования' : ''}</div><pre>{artifact.content}</pre></article>;
+}
+function Work({ run }: { run: Run }) {
+  const items = (run.workItems ?? []).filter(item => item.revision === run.revision);
+  const labels = { planned: 'В работе', ready: 'Ждёт проверки', verified: 'Проверено', blocked: 'Есть блокер' };
+  return <div className="tab-body"><h2>Выполнение задачи</h2><p className="muted">Проверяемые результаты текущей версии требований. {items.length ? `${items.filter(item => item.status === 'verified').length} из ${items.length} подтверждено.` : ''}</p>{!items.length && <Empty title="Пункты ещё не определены" text={run.workTracking ? 'Ведущий сформулирует результат и критерии проверки.' : 'В этой задаче учёт проверяемых пунктов не включён.'} />}{items.map(item => <article className="decision-card" key={item.id}><div className="card-kicker">{labels[item.status]} · {run.participants.find(p => p.id === item.ownerId)?.name ?? item.ownerId}</div><h3>{item.title}</h3><p><strong>Готово, когда:</strong> {item.acceptance}</p>{item.completionEvidence && <p><strong>Сделано:</strong> {item.completionEvidence}</p>}{item.verificationEvidence && <p><strong>Проверено:</strong> {item.verificationEvidence}</p>}{item.blocker && <p><strong>Блокер или доработка:</strong> {item.blocker}</p>}</article>)}</div>;
 }
 function Decisions({ run, busy, act }: { run: Run; busy: boolean; act: (fn: () => Promise<unknown>) => Promise<void> }) {
   return <div className="tab-body"><h2>Решения команды</h2><p className="muted">Предложения, принятые договорённости и решения, требующие пересмотра.</p>{!run.decisions.length && <Empty title="Решения ещё впереди" text="Когда участник предложит решение, оно появится здесь."/>}{run.decisions.map(d => <article className="decision-card" key={d.id}><div className="card-kicker">{({ proposed: 'Предложено', accepted: 'Принято', needs_review: 'Требует пересмотра', rejected: 'Отклонено' })[d.status]} · версия {d.revision}</div><h3>{d.title}</h3><p>{d.rationale}</p><div className="card-footer"><span>{run.participants.find(p => p.id === d.authorId)?.name}</span>{d.status !== 'accepted' && d.status !== 'rejected' && run.status !== 'cancelled' && <div><button className="quiet" disabled={busy} onClick={() => act(() => api(`/api/runs/${run.id}/decisions/${d.id}`, 'POST', { action: 'reject' }))}>Отклонить</button><button className="secondary" disabled={busy} onClick={() => act(() => api(`/api/runs/${run.id}/decisions/${d.id}`, 'POST', { action: 'accept' }))}>Принять</button></div>}</div></article>)}</div>;

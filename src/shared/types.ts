@@ -48,11 +48,19 @@ export interface Artifact {
   kind?: 'working' | 'result';
 }
 export interface Completion { summary: string; evidenceIds: string[]; revision: number }
+export interface WorkItem {
+  id: string; title: string; acceptance: string; ownerId: string; revision: number;
+  status: 'planned' | 'ready' | 'verified' | 'blocked';
+  completionEvidence?: string; verificationEvidence?: string; blocker?: string;
+  createdAt: string; updatedAt: string;
+}
 export interface Run {
   id: string; title: string; prompt: string; mode: 'demo' | 'gigacode'; status: RunStatus;
   note: string; revision: number; createdAt: string; updatedAt: string; workspace: string;
   team: Team; participants: Participant[]; messages: Message[]; turns: Turn[];
   topics: Topic[]; decisions: Decision[]; artifacts: Artifact[];
+  workTracking?: boolean; workItems?: WorkItem[];
+  noProgressTurns?: number; progressNudged?: boolean;
   resumeAfterRecovery?: boolean;
   turnBatchSize?: number;
   completion?: Completion; finalSummary?: string;
@@ -69,6 +77,11 @@ export type Action =
   | { type: 'resolve_topic'; topicId: string }
   | { type: 'propose_decision'; title: string; rationale: string }
   | { type: 'accept_decision'; decisionId: string }
+  | { type: 'work_item'; ownerId: string; title: string; acceptance: string }
+  | { type: 'work_done'; workItemId: string; evidence: string }
+  | { type: 'work_verify'; workItemId: string; evidence: string }
+  | { type: 'work_reopen'; workItemId: string; reason: string }
+  | { type: 'work_block'; workItemId: string; blocker: string }
   | { type: 'artifact'; title: string; content: string }
   | { type: 'result'; title: string; content: string }
   | { type: 'publish_artifact'; artifactId: string }

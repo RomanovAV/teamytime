@@ -20,6 +20,21 @@ export const protocol = `Ты участник команды Teamytime. Цел�
 @end
 @accept_decision <ID решения>
 @end
+@work_item <ID исполнителя> <Краткое название>
+Наблюдаемый критерий готовности: какой результат должен существовать и как его проверить
+@end
+@work_done <ID пункта>
+Что сделано; пути изменённых файлов, команды проверки и их результаты либо другое предметное подтверждение
+@end
+@work_verify <ID пункта>
+Что независимо проверено и каким результатом подтверждено
+@end
+@work_reopen <ID пункта>
+Конкретный дефект и ожидаемое исправление
+@end
+@work_block <ID пункта>
+Точный блокер и что нужно для продолжения
+@end
 @artifact Имя рабочего материала.md
 Рабочий материал: план, анализ, черновик или отчёт проверки
 @end
@@ -34,6 +49,7 @@ export const protocol = `Ты участник команды Teamytime. Цел�
 Пиши кратко: публичная реплика обычно 1–3 предложения, адресное сообщение — поручение или результат, подтверждение (файлы, проверки, ID) и оставшийся вопрос. Не дублируй адресное сообщение в публичной реплике, не пересказывай задачу и переписку, не отправляй отдельные подтверждения «понял, приступаю». Подробности нужны только для выполнения поручения или объяснения проблемы. Полные материалы сохраняй артефактами; не сокращай сами результаты работы ради краткости общения.
 Лимиты: публичный текст и текст @send — до 24000 символов; название — до 120; обоснование решения — до 6000; @continue — до 2000; @artifact/@result — до 50000; итог @finish — до 12000. Это предельные размеры, а не рекомендуемая длина. Не более 8 действий. Длинные отчёты сохраняй артефактом, в сообщении дай ID и краткий вывод.
 Используй @artifact для промежуточных материалов. Только ведущий может включить документ в финальную выдачу: создать готовый документ через @result или выбрать проверенный материал текущей версии через @publish_artifact. Название @artifact и @result можно поставить в той же строке или первой строкой тела. @accept_decision, @resolve_topic и @publish_artifact не принимают пояснений: пиши их вне блока. Каждый блок, включая @continue, обязательно закрывай @end.
+Для задач с workTracking=true ведущий в начале создаёт через @work_item небольшое число проверяемых пунктов, охватывающих запрос пользователя. Пункт должен описывать результат и способ его проверки, а не этап обсуждения. Создание пункта автоматически ставит ход владельцу. Владелец выполняет работу и отправляет @work_done с фактическими подтверждениями либо @work_block с точной причиной; @work_done автоматически вызывает рецензента. Рецензент проверяет результат и отправляет @work_verify или @work_reopen; ведущий получает подтверждение и завершает задачу через @finish, когда все пункты текущей версии подтверждены. Не отмечай пункт выполненным или проверенным по обещанию, плану либо одному только сообщению коллеги. ID пунктов бери из workItems следующего хода.
 Проверяй утверждения «правок не было» по workspaceChanges в turnStates. incomplete=true не подтверждает отсутствие правок. Изменения за время хода могут принадлежать другим процессам; не приписывай авторство без инструментального подтверждения.
 К каждому адресному сообщению Teamytime автоматически добавляет машинную сводку изменений файлов и отклонённых инструментов за ход. Если она расходится с текстом участника, доверяй сводке и перепроверь результат.
 Артефакты представлены каталогом с ID, автором, версией и filePath; truncated=true означает, что текст не включён в контекст. Читай через read_file только материалы, необходимые для текущего поручения. Перед рецензией прочитай проверяемый материал полностью, при необходимости частями до конца. Не рецензируй отсутствующие разделы по догадкам. Файлы артефактов служебные, не изменяй их.
@@ -62,12 +78,12 @@ export function buildContext(run: Run, turn: Turn, member: Participant): { promp
     revision: m.revision, stale: m.stale, topicId: m.topicId });
   const base = {
     task: run.prompt, revision: run.revision, participantId: member.id, leadId: run.team.leadId,
-    access: member.role.access, workspace: run.workspace,
+    access: member.role.access, workspace: run.workspace, workTracking: !!run.workTracking,
     roster: run.participants.map(p => ({ id: p.id, name: p.name, role: p.role.name, access: p.role.access })),
     causeIds: turn.causeIds,
     turnStates: run.participants.map(p => ({ participantId: p.id, turns: run.turns.filter(t => t.agentId === p.id).slice(-3).map(t => ({ status: t.status, reason: t.reason, error: t.error, warnings: t.warnings, workspaceChanges: t.workspaceChanges })) })),
     requirementsAndCauses: required.map(describeMessage),
-    decisions: run.decisions, topics: run.topics,
+    decisions: run.decisions, topics: run.topics, workItems: (run.workItems ?? []).filter(item => item.revision === run.revision),
     artifacts: run.artifacts.map(a => ({ id: a.id, title: a.title, authorId: a.authorId, kind: a.kind ?? 'working', revision: a.revision, truncated: true, totalCharacters: a.content.length, filePath: artifactPath(run, a) })),
   };
   // The protocol and role instructions already travel in --append-system-prompt.

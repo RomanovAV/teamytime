@@ -138,6 +138,26 @@ test('text replies support every action with multiline bodies', () => {
   assert.deepEqual(result.actions[7], { type: 'finish', evidenceIds: ['evidence-1', 'evidence-2'], summary: 'Итог работы' });
 });
 
+test('text replies parse the work and review cycle', () => {
+  const reply = parseReply(`Работа по задаче.
+@work_item vera Запустить песочницу
+Успешный запуск с кодом 0
+@end
+@work_done item-1
+Файл создан; тест завершился с кодом 0
+@end
+@work_verify item-1
+Повторил тест: код 0
+@end
+@work_reopen item-2
+Тест падает на macOS
+@end
+@work_block item-3
+Нет доступа к CLI
+@end`);
+  assert.deepEqual(reply.actions.map(action => action.type), ['work_item', 'work_done', 'work_verify', 'work_reopen', 'work_block']);
+});
+
 test('plain text works, malformed action blocks do not execute', () => {
   assert.deepEqual(parseReply('Проверка завершена.'), { message: 'Проверка завершена.', actions: [] });
   for (const raw of ['@send marina\nБез окончания', '@end', '@unknown\nx\n@end', '@send marina\n@continue\nx\n@end', '@send\nx\n@end', '@continue\n@end', '@resolve_topic t\nextra\n@end']) assert.throws(() => parseReply(raw), /протокола/);

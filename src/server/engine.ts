@@ -45,6 +45,8 @@ export class Engine {
       createdAt: now(), updatedAt: now(), workspace, team: structuredClone(team),
       participants: team.members.map(m => ({ ...m, role: structuredClone(config.roles.find(role => role.id === m.roleId)!), sessionId: uid(), sessionStarted: false })),
       messages: [], turns: [], topics: [], decisions: [], artifacts: [], turnBatchSize: team.maxTurns,
+      workTracking: data.mode === 'gigacode', workItems: [],
+      noProgressTurns: 0, progressNudged: false,
     };
     const m = message(run, { authorId: null, kind: 'user', text: data.prompt, recipientIds: [team.leadId] });
     queue(run, team.leadId, m.id, 'Новая задача'); this.store.create(run); this.kick(); return run;
@@ -59,6 +61,7 @@ export class Engine {
         r.revision++; r.completion = undefined; r.finalSummary = undefined;
         r.decisions.filter(d => d.status !== 'rejected').forEach(d => d.status = 'needs_review');
       }
+      r.noProgressTurns = 0; r.progressNudged = false;
       const m = message(r, { authorId: null, kind: 'user', text: data.text, recipientIds: recipients });
       recipients.forEach(to => queue(r, to, m.id, data.kind === 'update' ? 'Уточнение требований' : 'Сообщение пользователя'));
       r.completion = undefined; r.finalSummary = undefined;
@@ -79,6 +82,7 @@ export class Engine {
       if (['completed', 'cancelled'].includes(r.status)) throw new UserError('Задача уже завершена.');
       if (action === 'pause') { r.status = this.isActive(id) ? 'pausing' : 'paused'; r.note = 'Пауза по запросу пользователя.'; }
       else {
+        r.noProgressTurns = 0; r.progressNudged = false;
         if (r.turns.some(t => ['failed', 'interrupted'].includes(t.status))) throw new UserError('Сначала повторите или пропустите незавершённые ходы.');
         const exhausted = r.turns.filter(t => t.startedAt).length >= r.team.maxTurns;
         if (exhausted) {
@@ -268,10 +272,25 @@ export class Engine {
       if (a.type === 'open_topic' && !r.participants.some(p => p.id === a.ownerId)) throw new Error('Владелец темы не найден.');
       if (a.type === 'resolve_topic' && !r.topics.some(t => t.id === a.topicId && (lead || t.ownerId === turn.agentId))) throw new Error('Агент не может закрыть эту тему.');
       if (a.type === 'accept_decision' && (!lead || !r.decisions.some(d => d.id === a.decisionId && d.status === 'proposed' && d.revision === r.revision))) throw new Error('Агент не может принять это решение.');
+      if (a.type === 'work_item' && (!lead || !r.participants.some(p => p.id === a.ownerId))) throw new Error('Только ведущий может назначить проверяемый пункт существующему участнику.');
+      if (['work_done', 'work_verify', 'work_reopen', 'work_block'].includes(a.type)) {
+        const item = (r.workItems ?? []).find(item => item.id === ('workItemId' in a ? a.workItemId : '') && item.revision === r.revision);
+        if (!item) throw new Error('Проверяемый пункт текущей версии не найден.');
+        if (a.type === 'work_done' && (item.ownerId !== turn.agentId || !['planned', 'blocked'].includes(item.status))) throw new Error('Отметить выполненным может только назначенный исполнитель открытого пункта.');
+        if (a.type === 'work_block' && (item.ownerId !== turn.agentId || item.status !== 'planned')) throw new Error('Сообщить блокер может только назначенный исполнитель открытого пункта.');
+        const reviewers = r.participants.filter(p => p.role.kind === 'reviewer' && p.id !== item.ownerId);
+        const canReview = reviewers.length ? reviewers.some(p => p.id === turn.agentId) : lead;
+        if (a.type === 'work_verify' && (!canReview || item.status !== 'ready')) throw new Error('Подтвердить готовность может рецензент после отчёта исполнителя.');
+        if (a.type === 'work_reopen' && (!canReview || item.status !== 'ready')) throw new Error('Вернуть на доработку может рецензент после отчёта исполнителя.');
+      }
       if (a.type === 'result' && !lead) throw new Error('Только ведущий может создать финальный результат. Передайте материал ведущему через @artifact и @send.');
       if (a.type === 'publish_artifact' && (!lead || !r.artifacts.some(artifact => artifact.id === a.artifactId && artifact.revision === r.revision))) throw new Error('Ведущий может опубликовать только существующий материал текущей версии требований.');
       if (a.type === 'finish') {
         if (!lead) throw new Error('Завершить задачу может только ведущий.');
+        if (r.workTracking) {
+          const items = (r.workItems ?? []).filter(item => item.revision === r.revision);
+          if (!items.length || items.some(item => item.status !== 'verified')) throw new Error('Для завершения нужен хотя бы один проверяемый пункт; все пункты текущей версии должны быть подтверждены рецензентом.');
+        }
         const evidence = a.evidenceIds.map(id => r.messages.find(m => m.id === id));
         if (evidence.some(m => !m || m.kind !== 'agent' || m.authorId === turn.agentId || m.revision !== r.revision || m.stale)) throw new Error('Для завершения нужны актуальные сообщения коллег с результатами проверки.');
         const reviewers = r.participants.filter(p => p.role.kind === 'reviewer' && p.id !== turn.agentId);
@@ -297,6 +316,23 @@ export class Engine {
       r.completion = undefined;
       for (const m of r.messages) if (t.causeIds.includes(m.id) && !m.appliedBy.includes(p.id)) m.appliedBy.push(p.id);
       for (const a of reply.actions) this.apply(r, t, a);
+      if (r.workTracking && r.status === 'running') {
+        const workActions = new Set(['work_item', 'work_done', 'work_verify', 'work_reopen', 'work_block']);
+        const advanced = reply.actions.some(a => workActions.has(a.type)) || !!t.workspaceChanges?.files.length;
+        if (advanced) { r.noProgressTurns = 0; r.progressNudged = false; }
+        else {
+          r.noProgressTurns = (r.noProgressTurns ?? 0) + 1;
+          if (r.noProgressTurns === 8 && !r.progressNudged) {
+            const m = message(r, { authorId: null, kind: 'system', text: 'Восемь ходов без нового проверяемого пункта, выполненной работы, проверки или изменений файлов. Выбери и выполни следующий конкретный шаг; прекрати повторять обсуждение.', recipientIds: [r.team.leadId], turnId });
+            queue(r, r.team.leadId, m.id, 'Нет проверяемого прогресса');
+            r.progressNudged = true;
+          }
+          if (r.noProgressTurns >= 16) {
+            r.status = 'pausing';
+            r.note = '16 ходов без проверяемого прогресса. Проверьте блокер или скорректируйте задачу перед продолжением.';
+          }
+        }
+      }
     });
   }
   private apply(r: Run, t: Turn, a: Action) {
@@ -317,6 +353,38 @@ export class Engine {
           revision: r.revision, createdAt: now() });
         if (r.team.checkpoints === 'manual') { r.resumeAfterRecovery = false; r.status = 'pausing'; r.note = 'Команда предложила решение. Проверьте его и продолжите работу.'; } break;
       case 'accept_decision': r.decisions.find(d => d.id === a.decisionId)!.status = 'accepted'; break;
+      case 'work_item': {
+        const item = { id: uid(), title: a.title, acceptance: a.acceptance, ownerId: a.ownerId,
+          revision: r.revision, status: 'planned' as const, createdAt: now(), updatedAt: now() };
+        (r.workItems ??= []).push(item);
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `Пункт работы «${item.title}» (${item.id}). Критерий готовности: ${item.acceptance}`, recipientIds: [a.ownerId], turnId: t.id });
+        queue(r, a.ownerId, m.id, 'Назначен проверяемый пункт'); break;
+      }
+      case 'work_done': {
+        const item = r.workItems!.find(item => item.id === a.workItemId)!;
+        item.status = 'ready'; item.completionEvidence = a.evidence; item.blocker = undefined; item.verificationEvidence = undefined; item.updatedAt = now();
+        const reviewer = r.participants.find(p => p.role.kind === 'reviewer' && p.id !== item.ownerId)?.id ?? r.team.leadId;
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `Пункт «${item.title}» готов к проверке (${item.id}). Подтверждение исполнителя: ${a.evidence}`, recipientIds: [reviewer], turnId: t.id });
+        queue(r, reviewer, m.id, 'Проверка результата'); break;
+      }
+      case 'work_verify': {
+        const item = r.workItems!.find(item => item.id === a.workItemId)!;
+        item.status = 'verified'; item.verificationEvidence = a.evidence; item.updatedAt = now();
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `Пункт «${item.title}» подтверждён (${item.id}). Проверка: ${a.evidence}`, recipientIds: [r.team.leadId], turnId: t.id });
+        queue(r, r.team.leadId, m.id, 'Результат подтверждён'); break;
+      }
+      case 'work_reopen': {
+        const item = r.workItems!.find(item => item.id === a.workItemId)!;
+        item.status = 'planned'; item.completionEvidence = undefined; item.verificationEvidence = undefined; item.blocker = a.reason; item.updatedAt = now();
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `Пункт «${item.title}» возвращён на доработку (${item.id}). Причина: ${a.reason}`, recipientIds: [item.ownerId], turnId: t.id });
+        queue(r, item.ownerId, m.id, 'Доработка результата'); break;
+      }
+      case 'work_block': {
+        const item = r.workItems!.find(item => item.id === a.workItemId)!;
+        item.status = 'blocked'; item.completionEvidence = undefined; item.blocker = a.blocker; item.updatedAt = now();
+        const m = message(r, { authorId: t.agentId, kind: 'agent', text: `Пункт «${item.title}» заблокирован (${item.id}). Причина: ${a.blocker}`, recipientIds: [r.team.leadId], turnId: t.id });
+        queue(r, r.team.leadId, m.id, 'Блокер выполнения'); break;
+      }
       case 'artifact': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now(), kind: 'working' }); break;
       case 'result': r.artifacts.push({ id: uid(), title: a.title, content: a.content, authorId: t.agentId, revision: r.revision, createdAt: now(), kind: 'result' }); break;
       case 'publish_artifact': r.artifacts.find(artifact => artifact.id === a.artifactId)!.kind = 'result'; break;

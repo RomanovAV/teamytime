@@ -19,6 +19,11 @@ function action(header: string, lines: string[]): Action {
     case 'resolve_topic': requireArgs(1); emptyBody(); return { type: 'resolve_topic', topicId: args[0] };
     case 'propose_decision': requireArgs(1, 120); return { type: 'propose_decision', title: args.join(' '), rationale: body };
     case 'accept_decision': requireArgs(1); emptyBody(); return { type: 'accept_decision', decisionId: args[0] };
+    case 'work_item': requireArgs(2, 120); return { type: 'work_item', ownerId: args[0], title: args.slice(1).join(' '), acceptance: body };
+    case 'work_done': requireArgs(1); return { type: 'work_done', workItemId: args[0], evidence: body };
+    case 'work_verify': requireArgs(1); return { type: 'work_verify', workItemId: args[0], evidence: body };
+    case 'work_reopen': requireArgs(1); return { type: 'work_reopen', workItemId: args[0], reason: body };
+    case 'work_block': requireArgs(1); return { type: 'work_block', workItemId: args[0], blocker: body };
     case 'artifact': requireArgs(1, 120); return { type: 'artifact', title: args.join(' '), content: body };
     case 'result': requireArgs(1, 120); return { type: 'result', title: args.join(' '), content: body };
     case 'publish_artifact': requireArgs(1); emptyBody(); return { type: 'publish_artifact', artifactId: args[0] };

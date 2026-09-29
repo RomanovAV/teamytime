@@ -232,6 +232,62 @@ test('automatic checkpoints release existing lead proposals when a run resumes',
   } finally { await f.close(); }
 });
 
+test('tracked task moves from assigned work through independent review to completion', async () => {
+  const f = fixture(async c => {
+    const item = c.run.workItems?.find(item => item.revision === c.run.revision);
+    if (c.participant.id === 'marina' && !item) return { reply: { message: 'Назначаю результат', actions: [
+      { type: 'work_item', ownerId: 'vera', title: 'Готовый результат', acceptance: 'Файл создан и проверка прошла' },
+    ] } };
+    if (c.participant.id === 'vera') return { reply: { message: 'Работа выполнена', actions: [
+      { type: 'work_done', workItemId: item!.id, evidence: 'Создан result.txt; проверка завершилась с кодом 0' },
+    ] } };
+    if (c.participant.id === 'oleg') return { reply: { message: 'Проверил результат', actions: [
+      { type: 'work_verify', workItemId: item!.id, evidence: 'Прочитал result.txt и повторил проверку: код 0' },
+    ] } };
+    const evidence = c.run.messages.find(m => m.authorId === 'oleg' && m.recipientIds.includes('marina'))!;
+    return { reply: { message: 'Готово', actions: [{ type: 'finish', summary: 'Результат готов', evidenceIds: [evidence.id] }] } };
+  });
+  try {
+    const config = f.store.config(); config.cli.command = process.execPath; f.store.saveConfig(config);
+    const r = f.engine.create({ prompt: 'Создать проверенный результат', teamId: 'default-team', mode: 'gigacode' });
+    await until(() => f.store.get(r.id).status === 'completed');
+    const done = f.store.get(r.id);
+    assert.equal(done.workItems?.[0].status, 'verified');
+    assert.match(done.workItems?.[0].completionEvidence ?? '', /кодом 0/);
+    assert.match(done.workItems?.[0].verificationEvidence ?? '', /код 0/);
+    assert.equal(done.finalSummary, 'Результат готов');
+  } finally { await f.close(); }
+});
+
+test('tracked task rejects completion without verified work', async () => {
+  const f = fixture(async () => ({ reply: { message: 'Готово', actions: [
+    { type: 'finish', summary: 'Результат готов', evidenceIds: ['claimed-review'] },
+  ] } }));
+  try {
+    const config = f.store.config(); config.cli.command = process.execPath; f.store.saveConfig(config);
+    const r = f.engine.create({ prompt: 'Создать проверенный результат', teamId: 'default-team', mode: 'gigacode' });
+    await until(() => f.store.get(r.id).status === 'paused');
+    const state = f.store.get(r.id);
+    assert.equal(state.completion, undefined);
+    assert.match(state.turns[0].error ?? '', /проверяемый пункт/);
+  } finally { await f.close(); }
+});
+
+test('tracked task interrupts a discussion loop and asks for concrete progress', async () => {
+  const f = fixture(async c => ({ reply: { message: 'Обсуждаю', actions: [
+    { type: 'send', to: c.participant.id === 'marina' ? 'alex' : 'marina', text: 'Продолжим обсуждение' },
+  ] } }));
+  try {
+    const config = f.store.config(); config.cli.command = process.execPath; f.store.saveConfig(config);
+    const r = f.engine.create({ prompt: 'Создать проверенный результат', teamId: 'default-team', mode: 'gigacode' });
+    await until(() => f.store.get(r.id).status === 'paused');
+    const state = f.store.get(r.id);
+    assert.equal(state.noProgressTurns, 16);
+    assert.match(state.note, /без проверяемого прогресса/);
+    assert(state.messages.some(m => m.kind === 'system' && m.text.includes('Восемь ходов')));
+  } finally { await f.close(); }
+});
+
 test('continue replenishes an exhausted task from current team settings', async () => {
   const f = fixture(async c => ({ reply: { message: 'Передаю ход', actions: [{ type: 'send', to: c.participant.id === 'marina' ? 'alex' : 'marina', text: 'Ещё один ход' }] } }));
   try {
