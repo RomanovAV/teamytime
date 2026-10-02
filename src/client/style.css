@@ -16,3 +16,8 @@
 .reply-repair textarea { width: 100%; box-sizing: border-box; padding: 12px; margin: 8px 0; font: 13px/1.5 monospace; resize: vertical; }
 .tabs { overflow-x: auto; }
 .tabs button { flex-shrink: 0; }
+.decision-review{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.decision-review label{display:block;margin-bottom:8px;font-size:12px;font-weight:600;color:var(--ink)}
+.decision-review textarea{display:block;width:100%;margin-bottom:10px}
+.decision-review>div{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.decision-comment{padding:10px 12px;border-radius:6px;background:#f1f5e9;overflow-wrap:anywhere}

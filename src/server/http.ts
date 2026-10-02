@@ -85,7 +85,10 @@ export function createApplication(store: Store, engine: Engine, webDirectory: st
             const data = await body(req);
             return json(res, data.action === 'repair' ? engine.repairTurn(id, parts[4], data.text, data.resume) : engine.resolveTurn(id, parts[4], data.action, data.resume));
           }
-          if (parts[3] === 'decisions') return json(res, engine.decide(id, parts[4], (await body(req)).action));
+          if (parts[3] === 'decisions') {
+            const data = await body(req);
+            return json(res, engine.decide(id, parts[4], data.action, data.comment));
+          }
         }
         if (parts.length === 5 && parts[3] === 'artifacts' && method === 'GET') {
           const a = store.get(id).artifacts.find(a => a.id === parts[4]); if (!a) throw new UserError('Результат не найден.', 404);

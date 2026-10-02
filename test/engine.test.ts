@@ -195,6 +195,40 @@ test('manual checkpoint retains queued work until the user continues', async () 
   } finally { await f.close(); }
 });
 
+test('acceptance and rejection comments are saved and delivered to the lead', async () => {
+  for (const action of ['accept', 'reject'] as const) {
+    const f = fixture();
+    try {
+      const config = f.store.config(); config.teams[0].checkpoints = 'manual'; f.store.saveConfig(config);
+      const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+      const decisionId = f.store.get(r.id).decisions[0].id;
+      assert.throws(() => f.engine.decide(r.id, decisionId, action, 42), /Комментарий должен быть текстом/);
+      assert.throws(() => f.engine.decide(r.id, decisionId, action, 'x'.repeat(6001)), /6000 символов/);
+      assert.equal(f.store.get(r.id).decisions[0].status, 'proposed');
+      f.engine.decide(r.id, decisionId, action, '  Проверь запуск на macOS.  ');
+      const state = f.store.get(r.id);
+      assert.equal(state.decisions[0].status, action === 'accept' ? 'accepted' : 'rejected');
+      assert.equal(state.decisions[0].userComment, 'Проверь запуск на macOS.');
+      assert(state.messages.some(m => m.kind === 'user' && m.recipientIds.includes(state.team.leadId) && m.text.includes('Комментарий: Проверь запуск на macOS.')));
+      assert.throws(() => f.engine.decide(r.id, decisionId, action), /уже принято или отклонено/);
+    } finally { await f.close(); }
+  }
+});
+
+test('a decision can still be accepted or rejected without a comment', async () => {
+  for (const action of ['accept', 'reject'] as const) {
+    const f = fixture();
+    try {
+      const config = f.store.config(); config.teams[0].checkpoints = 'manual'; f.store.saveConfig(config);
+      const r = f.create(); await until(() => f.store.get(r.id).status === 'paused');
+      f.engine.decide(r.id, f.store.get(r.id).decisions[0].id, action);
+      const decision = f.store.get(r.id).decisions[0];
+      assert.equal(decision.status, action === 'accept' ? 'accepted' : 'rejected');
+      assert.equal(decision.userComment, undefined);
+    } finally { await f.close(); }
+  }
+});
+
 test('automatic checkpoints accept lead decisions and do not block completion', async () => {
   const f = fixture(async c => {
     if (c.participant.id === 'marina' && !c.run.decisions.length) {

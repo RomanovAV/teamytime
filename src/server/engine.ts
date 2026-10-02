@@ -146,13 +146,19 @@ export class Engine {
     this.store.finishDiagnostics(turnId, { status: 'succeeded', finishedAt: value.turns.find(t => t.id === turnId)!.finishedAt, repaired: true }, run.workspace);
     this.kick(); return value;
   }
-  decide(id: string, decisionId: string, action: string) {
+  decide(id: string, decisionId: string, action: string, comment?: unknown) {
     if (!['accept', 'reject'].includes(action)) throw new UserError('Неизвестное решение.');
+    if (comment !== undefined && typeof comment !== 'string') throw new UserError('Комментарий должен быть текстом.');
+    const userComment = typeof comment === 'string' ? comment.trim() : '';
+    if (userComment.length > 6000) throw new UserError('Комментарий не должен превышать 6000 символов.');
     const value = this.store.update(id, 'decision', r => {
       if (r.status === 'cancelled') throw new UserError('Задача остановлена.');
       const d = r.decisions.find(d => d.id === decisionId); if (!d) throw new UserError('Решение не найдено.');
+      if (!['proposed', 'needs_review'].includes(d.status)) throw new UserError('Это решение уже принято или отклонено.');
       d.status = action === 'accept' ? 'accepted' : 'rejected'; d.revision = r.revision;
-      const m = message(r, { authorId: null, kind: 'user', text: `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».`, recipientIds: [r.team.leadId] });
+      d.userComment = userComment || undefined;
+      const text = `${action === 'accept' ? 'Принимаю' : 'Отклоняю'} решение «${d.title}».${userComment ? ` Комментарий: ${userComment}` : ''}`;
+      const m = message(r, { authorId: null, kind: 'user', text, recipientIds: [r.team.leadId] });
       queue(r, r.team.leadId, m.id, 'Решение пользователя');
       r.completion = undefined;
       if (['completed', 'waiting'].includes(r.status)) r.status = 'running';

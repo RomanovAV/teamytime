@@ -42,6 +42,7 @@ export interface Topic { id: string; title: string; ownerId: string; status: 'op
 export interface Decision {
   id: string; title: string; rationale: string; authorId: string;
   status: 'proposed' | 'accepted' | 'needs_review' | 'rejected'; revision: number; createdAt: string;
+  userComment?: string;
 }
 export interface Artifact {
   id: string; title: string; content: string; authorId: string; revision: number; createdAt: string;
